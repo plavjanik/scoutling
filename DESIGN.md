@@ -81,7 +81,7 @@ scoutling/
     cli.ts            # entry (`#!/usr/bin/env node`); hand-rolled arg parsing, subcommands
     config.ts         # layered: flag > env > config.local.json > config.json > ~/.config > built-in (§5)
     provider.ts       # createOpenAICompatible({ baseURL, apiKey, supportsStructuredOutputs })
-    loop.ts           # runScoutling(): generateText + stopWhen: stepCountIs(N) + byte budget + timeout
+    loop.ts           # runScoutling(): generateText + stopWhen: isStepCount(N) + byte budget + timeout
     prompt.ts         # default system prompt; contextFiles injection (realpath-deduped, capped)
     tools/
       index.ts        # the 3 read-only tools (ai `tool()` + zod)
@@ -96,7 +96,7 @@ scoutling/
     types.ts
   test/
     guardrails.test.ts  tools.test.ts  grep-injection.test.ts  toon.test.ts
-    citations.test.ts   budget.test.ts  no-write.test.ts  loop.test.ts   # all hermetic: ai/test MockLanguageModelV2
+    citations.test.ts   budget.test.ts  no-write.test.ts  loop.test.ts   # all hermetic: ai/test MockLanguageModelV4
     fixtures/           # small tree used by tools tests
   eval/
     run-eval.ts         # `scoutling-eval --questions <file> --repo <dir> --models a,b --runs 3`
@@ -110,10 +110,15 @@ scoutling/
 **Dependencies (runtime):** `ai` **^7** (7.0.83 as of 2026-08-27 — the `local-ai` examples are
 on v5; follow the installed `ai-sdk` skill for the v7 API, not those examples verbatim),
 `@ai-sdk/openai-compatible` ^3, `zod`, `@toon-format/toon` ^4.1, `@vscode/ripgrep` ^1.18,
-`ignore` (gitignore matching). **Dev:** `typescript` ^5.7, `tsdown` (or `tsup` — the
-`ts-library` skill's call), `tsx`, `vitest` ^2. Bundle to one ESM file so `npx` startup is fast;
-`@vscode/ripgrep` stays external (it downloads a per-platform binary on install). The hermetic
-test mock is whatever `ai/test` exports in v7 (v5 called it `MockLanguageModelV2`).
+`ignore` (gitignore matching). **Dev:** `typescript` ^5.7, `tsdown` (the `ts-library` skill's
+call; note it requires Node ^22.18 || >=24.11 to *build*), `tsx`, `vitest` **^4** (^2 in the
+original draft was two majors stale). Bundle to one ESM file so `npx` startup is fast;
+`@vscode/ripgrep` stays external. **Verified in Phase 1:** as of 1.18.0 it no longer downloads a
+binary in a postinstall hook — it declares per-platform optional dependencies
+(`@vscode/ripgrep-darwin-arm64` and friends), which install cleanly under pnpm's default
+blocked-build-scripts policy. The hermetic test mock is **`MockLanguageModelV4`**, and the stop
+helper is **`isStepCount(n)`** (v7 renamed `stepCountIs`; the old name survives as a deprecated
+alias).
 
 **Skills installed for agents working on this repo** (project-scoped via `npx skills`, pinned in
 `skills-lock.json`, restored with `npx skills experimental_install`): `axi` (agent-facing CLI
@@ -328,7 +333,9 @@ per model (one GPU), and writes `eval/results/<ts>-<model>.json` + a markdown ta
 | `qwen/qwen3.8-27b` | `chat-strict` | today's structured-task winner on this machine |
 | `qwen/qwen3.6-35b-a3b` | — | the cheap floor: how small can we go? |
 
-(`qwen/qwen3-coder-30b` from the earlier draft does not exist in LM Studio.)
+(Re-checked 2026-08-28: `qwen/qwen3-coder-30b` *is* present in LM Studio on the reference
+machine, so the earlier draft's note that it does not exist was wrong. All four models above are
+confirmed present.)
 
 **Runs:** 3 per cell — 2 at `temperature 0` + 1 at `0.5`. At temp 0 most local backends repeat
 themselves; the variance that matters is tool-call parse failures, budget exhaustion and JIT
@@ -387,8 +394,9 @@ delegation rule; review, eval grading and the README claims stay in the main loo
   shows real tool calls.
 - Failure paths: `--base-url http://localhost:1/v1` → fast `PROVIDER_UNREACHABLE` (exit 3), no
   hang; `--timeout-ms 1000` → `TIMEOUT` (exit 4) with the cold-load hint.
-- Cross-platform CI: ubuntu/macos/windows × node 22/24 (the `@vscode/ripgrep` postinstall is
-  the main cross-platform risk; CI proves it).
+- Cross-platform CI: ubuntu/macos/windows × node 22/24. The original cross-platform worry was
+  the `@vscode/ripgrep` postinstall; that mechanism no longer exists (see §4), so the real
+  residual risk is Windows path handling in `guardrails.ts` and the CLI entry point.
 
 ## 15. Future ideas (post-v0.1, roughly by value ÷ effort)
 
