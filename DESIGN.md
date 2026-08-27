@@ -402,8 +402,13 @@ delegation rule; review, eval grading and the README claims stay in the main loo
 4. **Auto-escalation** — `--escalate`: run `quick`; if `exhausted` or zero verified citations,
    re-run `deep` (optionally on `--fallback-model`, e.g. a bigger local or a cloud model). One
    dial that adapts to question difficulty.
-5. **`symbols` / `outline` tool** — tree-sitter (or `@vscode/ripgrep` + language regexes) listing
-   of functions/classes/exports per file. What `probe` does well; keeps reads targeted. Read-only.
+5. **`symbols` / `outline` tool, tree-sitter AST parsing** — a real AST, not line matching:
+   functions/classes/exports per file, "where is this defined", "what calls this", and the
+   ability to return *one function* instead of a 400-line page. This is what `probe` does well
+   and it attacks the loop's dominant cost — a small model burning its context on whole files it
+   only needed six lines of. `web-tree-sitter` (WASM) keeps it portable and avoids native
+   rebuilds per Node version; grammars are per-language, so ship a few (ts/js, python, go, rust)
+   and degrade to `grep` for the rest. Read-only by the same standard as the existing tools.
 6. **Structured answers** — `--schema <json-schema>`: `generateObject` against the *same*
    configured model (never a hardcoded second model — that was the mistake in the earlier
    `--format toon` design). Lets a parent agent get `{answer, confidence, files_to_read[]}`.
@@ -426,6 +431,25 @@ delegation rule; review, eval grading and the README claims stay in the main loo
      replicas, ticket lookups) without forking.
 15. **Answer-language flag** — `--lang cs` for non-English teams; the built-in prompt already
      answers in the question's language, this pins it.
+16. **AI-friendly semantic code search** — a `search_semantic` tool: embed the scope's chunks
+     once, embed the question, retrieve by cosine similarity, so "where do we handle retries?"
+     finds `backoff.ts` without the model guessing the right literal. Costs nothing in provider
+     coupling: the configured base URL is OpenAI-compatible, so `/v1/embeddings` is already
+     reachable (LM Studio on the reference machine serves `text-embedding-qwen3-embedding-8b`
+     and `text-embedding-nomic-embed-code` today), and it degrades to lexical `grep` when the
+     endpoint has no embedding model. Best paired with #5: chunk on AST boundaries rather than
+     fixed line windows, so a retrieved chunk is a whole function.
+
+     **Blocker to resolve first — this collides with the read-only guarantee.** A usable index
+     has to be persisted somewhere, and ADR 0002 makes read-only structural: no file in `src/`
+     may import a filesystem write API, enforced permanently by `no-write.test.ts`. Idea #8
+     (a `~/.cache/scoutling` read cache) has exactly the same problem. Three ways out, in
+     preference order: (a) index in memory per run — no writes at all, correct but re-embeds
+     every run, viable only for small scopes; (b) a separate `scoutling index` binary/entry
+     point that is the *only* thing allowed to write, keeping the investigating process itself
+     write-free and the `no-write` gate scoped to the run path; (c) relax the ADR — rejected,
+     since "a scoutling answer came from a run that changed nothing" is the product. Do not
+     start this work without picking one and amending ADR 0002 accordingly.
 
 ## 16. Decisions log
 
