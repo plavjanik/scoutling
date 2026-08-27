@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { generateText } from 'ai'
 
-import { createProvider } from '../src/provider.js'
+import { createProvider, listModels } from '../src/provider.js'
 
 /** Captures the request the provider makes without a provider being reachable. */
 function recordingFetch(): { calls: Array<{ url: string; init: RequestInit }>; fetch: typeof fetch } {
@@ -57,5 +57,39 @@ describe('createProvider', () => {
     )
 
     expect(model.modelId).toBe('qwen/qwen3-coder-next')
+  })
+})
+
+describe('listModels', () => {
+  it('returns the model ids from GET /models', async () => {
+    const fetchImpl = (async (url: string | URL | Request) => {
+      expect(String(url)).toBe('http://localhost:4321/v1/models')
+      return new Response(
+        JSON.stringify({ data: [{ id: 'qwen/qwen3-coder-next' }, { id: 'qwen/qwen3-next-80b' }] }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )
+    }) as unknown as typeof fetch
+
+    const models = await listModels({ baseUrl: 'http://localhost:4321/v1', apiKey: 'x', fetch: fetchImpl })
+
+    expect(models).toEqual(['qwen/qwen3-coder-next', 'qwen/qwen3-next-80b'])
+  })
+
+  it('rejects when the provider is unreachable, rather than hanging', async () => {
+    const fetchImpl = (async () => {
+      throw new TypeError('fetch failed')
+    }) as unknown as typeof fetch
+
+    await expect(
+      listModels({ baseUrl: 'http://localhost:4321/v1', apiKey: 'x', fetch: fetchImpl }),
+    ).rejects.toThrow()
+  })
+
+  it('rejects on a non-OK response', async () => {
+    const fetchImpl = (async () => new Response('nope', { status: 500 })) as unknown as typeof fetch
+
+    await expect(
+      listModels({ baseUrl: 'http://localhost:4321/v1', apiKey: 'x', fetch: fetchImpl }),
+    ).rejects.toThrow()
   })
 })
