@@ -13,18 +13,24 @@ import { runCli } from '../src/cli.js'
 
 const BASE_URL = process.env.SCOUTLING_BASE_URL ?? 'http://localhost:1234/v1'
 const MODEL = process.env.SCOUTLING_MODEL ?? 'qwen/qwen3-coder-next'
-// The question names the file on purpose. Phase 2 ships read_file and nothing
-// else — no list_dir, no grep — so the model has no way to *find* a file, and
-// an open "where is X handled?" question is unanswerable by construction until
-// Phase 3. What this smoke proves is DESIGN.md §13's actual Phase 2 goal:
-// connectivity and tool-calling end to end against a real provider.
+// The question deliberately does NOT name a file. Phase 2's version had to —
+// with read_file as the only tool the model had no way to *find* anything, so
+// an open "where is X?" was unanswerable by construction. Phase 3 ships
+// list_dir and grep, so what this smoke now proves is the discovery path
+// itself: the run has to locate the file before it can read it. If a future
+// change breaks grep or list_dir, this question stops being answerable and
+// the smoke says so, which naming the file would hide.
 const QUESTION =
-  'Read src/guardrails.ts and explain what resolvePath does when it is given a path that ' +
-  'resolves outside the scope root. Cite path:line.'
+  'Where is the guard that stops a model-chosen grep pattern from being parsed as a ripgrep ' +
+  'flag, and what exactly does it do? Cite path:line.'
 
-// Cold JIT model load in LM Studio can take 60s+ (DESIGN.md §7); give it
-// real headroom but never hang forever if nothing is listening at all.
-const SMOKE_TIMEOUT_MS = 120_000
+// Cold JIT model load in LM Studio can take 60s+ (DESIGN.md §7), and since
+// Phase 3 a run gets 8 steps rather than 3 and spends the first one or two on
+// discovery — observed runs of this exact question land around 3.5 minutes on
+// qwen/qwen3-coder-next. 120s was right for Phase 2 and would now fail a
+// perfectly healthy run. Still bounded, so nothing hangs when the endpoint is
+// simply not listening.
+const SMOKE_TIMEOUT_MS = 300_000
 
 async function main(): Promise<number> {
   console.error(`scoutling smoke: ${BASE_URL} model=${MODEL}`)
