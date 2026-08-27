@@ -440,16 +440,17 @@ delegation rule; review, eval grading and the README claims stay in the main loo
      endpoint has no embedding model. Best paired with #5: chunk on AST boundaries rather than
      fixed line windows, so a retrieved chunk is a whole function.
 
-     **Blocker to resolve first — this collides with the read-only guarantee.** A usable index
-     has to be persisted somewhere, and ADR 0002 makes read-only structural: no file in `src/`
-     may import a filesystem write API, enforced permanently by `no-write.test.ts`. Idea #8
-     (a `~/.cache/scoutling` read cache) has exactly the same problem. Three ways out, in
-     preference order: (a) index in memory per run — no writes at all, correct but re-embeds
-     every run, viable only for small scopes; (b) a separate `scoutling index` binary/entry
-     point that is the *only* thing allowed to write, keeping the investigating process itself
-     write-free and the `no-write` gate scoped to the run path; (c) relax the ADR — rejected,
-     since "a scoutling answer came from a run that changed nothing" is the product. Do not
-     start this work without picking one and amending ADR 0002 accordingly.
+     **On read-only:** an index or cache is compatible with ADR 0002. That ADR is about the
+     *model* having no means to change the scope — the codebase under investigation — so that a
+     parent agent can trust the run changed nothing in its repo. A cache under
+     `~/.cache/scoutling` is outside the scope, is never model-controlled, and does not touch the
+     code. The same reasoning covers idea #8. What must hold: nothing is ever written inside the
+     scope root, and neither the path nor the content of a cache entry is chosen by the model —
+     cache keys derive from realpath + mtime, never from a model-supplied string. Note that
+     `CLAUDE.md`'s blanket phrasing ("no file in `src/` imports a filesystem write API") is a
+     mechanism, not the guarantee, and would need narrowing to something like "no write is
+     reachable from a tool, and no write targets the scope" before this work starts — otherwise
+     the `no-write` gate blocks a cache it was never meant to prohibit.
 
 ## 16. Decisions log
 
