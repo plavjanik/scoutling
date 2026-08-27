@@ -11,7 +11,9 @@ import { buildSystemPrompt } from './prompt.js'
 import { createProvider, listModels } from './provider.js'
 import type { ScoutlingConfig } from './types.js'
 
-const USAGE = `scoutling "<question>" --model <id> [--path <dir>] [--base-url <url>] [--api-key <key>] [--verbose]
+const USAGE = `🐦 scoutling — read-only, bounded codebase investigation.
+
+scoutling "<question>" --model <id> [--path <dir>] [--base-url <url>] [--api-key <key>] [--verbose]
 scoutling --help
 
 Runs a bounded, read-only investigation of the directory tree at --path (default: the current

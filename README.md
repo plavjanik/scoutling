@@ -1,4 +1,4 @@
-# scoutling
+# 🐦 scoutling
 
 > **Your little birds for the codebase.**
 
@@ -6,7 +6,7 @@ A read-only, bounded investigator that any coding agent can send ahead, on any l
 
 Claude Code, Codex CLI, OpenCode or Cursor shells out to `scoutling "how does X work?"`; a cheap
 local model (LM Studio, Ollama, vLLM — any OpenAI-compatible endpoint) reads, lists and greps the
-repo within a hard turn/token budget and reports back with `path:line` citations. It cannot write.
+repo within a hard step and byte budget and reports back with `path:line` citations. It cannot write.
 The expensive model only ever reads the conclusion.
 
 **Status: design complete, implementation in progress.** This npm name is reserved; the first
@@ -22,7 +22,7 @@ npx scoutling "Where is the retry logic for image generation, and what does it b
 ## Why
 
 - **Read-only by construction** — no write/edit/shell tool exists in the process; proven by tests.
-- **Bounded** — `--budget quick|normal|deep` caps turns, tool-output bytes, output tokens and
+- **Bounded** — `--budget quick|normal|deep` caps steps, tool-output bytes, output tokens and
   wall time in one dial.
 - **Cited** — every claim carries `path:line`; citations are verified to exist and returned as
   structured `sources[]` so the parent agent knows what to read next.

@@ -1,7 +1,7 @@
 {
   "name": "scoutling",
   "version": "0.0.1",
-  "description": "Your little birds for the codebase — a read-only, bounded investigator that any coding agent can send ahead, on any local OpenAI-compatible model.",
+  "description": "🐦 Your little birds for the codebase — a read-only, bounded investigator that any coding agent can send ahead, on any local OpenAI-compatible model.",
   "license": "MIT",
   "author": "Petr Plavjanik",
   "repository": {

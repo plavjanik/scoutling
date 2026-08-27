@@ -1,4 +1,4 @@
-# scoutling — design
+# 🐦 scoutling — design
 
 > **Your little birds for the codebase.** A scoutling is a small scout you send ahead. It looks,
 > it reports back with `path:line` citations, it never touches anything. It runs on whatever
