@@ -11,20 +11,22 @@ import { buildSystemPrompt } from './prompt.js'
 import { createProvider, listModels } from './provider.js'
 import type { ScoutlingConfig } from './types.js'
 
-const USAGE = `🐦 scoutling — read-only, bounded codebase investigation.
+const USAGE = `🐦 scoutling — read-only, bounded codebase investigation with list_dir, grep and read_file.
 
-scoutling "<question>" --model <id> [--path <dir>] [--base-url <url>] [--api-key <key>] [--verbose]
+scoutling "<question>" --model <id> [--path <dir>] [--base-url <url>] [--api-key <key>]
+          [--max-steps <n>] [--verbose]
 scoutling --help
 
 Runs a bounded, read-only investigation of the directory tree at --path (default: the current
 directory) and prints a cited answer to stdout.
 
-  --model <id>       Model to run, e.g. qwen/qwen3-coder-next. Required (flag, env, or config).
+  --model <id>        Model to run, e.g. qwen/qwen3-coder-next. Required (flag, env, or config).
   --path <dir>        Scope root — the only directory the run can see. Default: cwd.
   --base-url <url>    OpenAI-compatible endpoint. Default: http://localhost:1234/v1.
   --api-key <key>     Sent as a Bearer token. Default: not-needed (fine for LM Studio/Ollama).
-  --verbose            Log one line per step to stderr (tool name, args, bytes returned).
-  --help               Print this message and exit 0.
+  --max-steps <n>     Maximum tool-call steps before the run stops and reports exhausted. Default: 8.
+  --verbose           Log one line per step to stderr (tool name, args, bytes returned).
+  --help              Print this message and exit 0.
 
 Examples:
   scoutling "Where is resolvePath defined?" --model qwen/qwen3-coder-next
@@ -38,6 +40,7 @@ export interface ParsedArgs {
   path?: string
   baseUrl?: string
   apiKey?: string
+  maxSteps?: number
 }
 
 const FLAGS_WITH_VALUE = {
@@ -46,6 +49,9 @@ const FLAGS_WITH_VALUE = {
   '--base-url': 'baseUrl',
   '--api-key': 'apiKey',
 } as const
+
+/** Flags parsed via this table get a genuine number, not a string forced through the string-keyed table above. */
+const NUMERIC_FLAGS = { '--max-steps': 'maxSteps' } as const
 
 const BOOLEAN_FLAGS = {
   '--verbose': 'verbose',
@@ -79,8 +85,30 @@ export function parseArgs(argv: string[]): ParsedArgs {
       continue
     }
 
+    if (token in NUMERIC_FLAGS) {
+      const rawValue = argv[i + 1]
+      if (rawValue === undefined || rawValue.startsWith('--')) {
+        throw new ScoutlingError('BAD_ARGS', `${token} requires a value.`, `Usage: ${token} <n>`)
+      }
+      const value = Number(rawValue)
+      if (!Number.isInteger(value) || value < 1) {
+        throw new ScoutlingError(
+          'BAD_ARGS',
+          `${token} must be a positive integer, got: ${rawValue}`,
+          `Usage: ${token} <n>, e.g. ${token} 8`,
+        )
+      }
+      args[NUMERIC_FLAGS[token as keyof typeof NUMERIC_FLAGS]] = value
+      i += 1
+      continue
+    }
+
     if (token.startsWith('--')) {
-      const validFlags = [...Object.keys(FLAGS_WITH_VALUE), ...Object.keys(BOOLEAN_FLAGS)].join(', ')
+      const validFlags = [
+        ...Object.keys(FLAGS_WITH_VALUE),
+        ...Object.keys(NUMERIC_FLAGS),
+        ...Object.keys(BOOLEAN_FLAGS),
+      ].join(', ')
       throw new ScoutlingError('BAD_ARGS', `Unknown flag: ${token}`, `Valid flags: ${validFlags}`)
     }
 
@@ -244,6 +272,8 @@ export async function runCli(io: CliIO): Promise<number> {
       model,
       temperature: config.temperature,
       systemPrompt,
+      excludeGlobs: config.excludeGlobs,
+      ...(args.maxSteps !== undefined ? { maxSteps: args.maxSteps } : {}),
       ...(args.verbose ? { onStep: (step: StepSummary) => writeStderr(`${formatStepLog(step)}\n`) } : {}),
     })
 

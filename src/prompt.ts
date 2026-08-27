@@ -46,9 +46,13 @@ function builtInPrompt(scopeRoot: string): string {
     `Your scope root is: ${scopeRoot}`,
     'Nothing outside this directory tree exists as far as you are concerned.',
     '',
-    'read_file is the only tool you have. There is no shell, no search, no directory listing and',
-    'no way to run commands — calling anything else just wastes a step. read_file paginates long',
-    'files via offset/limit rather than truncating them, so page forward instead of re-reading.',
+    'You have exactly three tools — list_dir, grep and read_file — and these are the only tools ' +
+      'you have: no shell, no write tool, no way to run commands, and nothing else to call. ' +
+      'Calling anything else just wastes a step.',
+    '',
+    'Prefer list_dir and grep to orient yourself before reading — list a directory or search for a',
+    'term first, rather than sweeping whole files blind. read_file paginates long files via',
+    'offset/limit rather than truncating them, so page forward instead of re-reading.',
     '',
     'Cite your evidence: every factual claim in your answer must carry a path:line (or',
     'path:line-line) citation pointing at the file and line you saw it in, relative to the scope',

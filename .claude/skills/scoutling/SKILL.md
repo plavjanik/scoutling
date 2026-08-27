@@ -27,7 +27,7 @@ context on the conclusion rather than the search.
 ## Usage
 
 ```bash
-scoutling "<question>" --model <id> [--path <dir>] [--base-url <url>] [--verbose]
+scoutling "<question>" --model <id> [--path <dir>] [--base-url <url>] [--max-steps <n>] [--verbose]
 ```
 
 The answer goes to stdout as plain text. Errors are one-line JSON on stderr with a code:
@@ -42,6 +42,9 @@ Omitting `--model` is safe: the error lists the models the endpoint actually ser
 # Locate something, then read the cited lines yourself.
 scoutling "Where is the scope-root containment check implemented?" --model qwen/qwen3-coder-next
 
+# Give a wide-ranging question more room than the default eight steps.
+scoutling "Map the tools and how they are assembled" --model qwen/qwen3-coder-next --max-steps 15
+
 # Investigate a different repository.
 scoutling "What does this package export?" --path ../other-repo --model qwen/qwen3-coder-next
 
@@ -51,8 +54,9 @@ scoutling "How is config precedence resolved?" --model qwen/qwen3-coder-next --v
 
 ## Getting a good answer out of it
 
-- **Name the file when you know it.** The current tool set is `read_file` only — there is no
-  search or directory listing yet, so an open "where is X?" makes the model guess paths.
+- **An open "where is X?" is fair game.** The tool set is `list_dir`, `grep` and `read_file`, so
+  the run can find its own way to a file. Naming the file when you already know it is still
+  cheaper — it saves a discovery step out of the eight.
 - **Ask one question per run.** One question, one answer, one budget.
 - **Ask for citations explicitly** if the answer will drive a change; the built-in prompt
   requires them, and saying so again makes small models comply more reliably.

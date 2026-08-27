@@ -13,18 +13,22 @@ Read, in this order, before changing anything:
 
 ## Status — read this first
 
-**Phases 1 and 2 of DESIGN.md §13 are done, green and pushed. Phase 3 is next.**
+**Phases 1-3 of DESIGN.md §13 are done and green. Phase 4 is next.**
 
 Shipping today: `config.ts` (six layers + provenance), `provider.ts` (+ `listModels`),
-`guardrails.ts`, `tools/read-file.ts`, `prompt.ts`, `loop.ts` (`runScoutling`), `cli.ts`
-(`runCli`, injectable I/O), `script/smoke.ts`. **85 hermetic tests, 8 files.** CI is green on
-ubuntu/macos/windows × node 22/24.
+`guardrails.ts`, `scope-walk.ts`, all three tools (`tools/read-file.ts`, `tools/list-dir.ts`,
+`tools/grep.ts`, assembled by `tools/index.ts`), `prompt.ts`, `loop.ts` (`runScoutling`),
+`cli.ts` (`runCli`, injectable I/O), `script/smoke.ts`. **161 hermetic tests, 12 files.** CI is
+green on ubuntu/macos/windows × node 22/24.
 
-**Phase 3 adds** `list_dir`, `grep` (via `@vscode/ripgrep`, `execFile(rg, ["-e", pattern, "--",
-…])`), gitignore handling, the grep-injection test, and raises the step cap. Until `grep` and
-`list_dir` exist there is **no discovery tool**, so a question like "where is X?" is
-unanswerable by construction — a question must name its file. This is the single biggest
-limitation right now and the reason dogfooding starts at Phase 3, not before.
+A run finally has a **discovery tool**, so "where is X?" no longer has to name its file — that
+was Phase 2's single biggest limitation and the reason dogfooding starts now, not earlier. The
+default step cap is 8 (DESIGN.md §7's `normal` preset), overridable with `--max-steps`.
+
+**Phase 4 adds** `budget.ts` (presets + cumulative tool-output byte accounting), `citations.ts`
++ `--require-citations`, TOON encoding of the `list_dir`/`grep` results (both return plain JSON
+today, with a comment at each return site saying Phase 4 owns it), `--format json`,
+`scoutling models`, `scoutling doctor`, and reading the question from stdin.
 
 ## Rules
 
@@ -65,6 +69,24 @@ These cost real time to discover; the type checker does not catch the first two.
   never a write.
 - Vitest cannot `vi.spyOn` Node ESM built-ins ("Module namespace is not configurable"). Use
   `vi.mock('node:fs', { spy: true })`, which spies while the real implementation still runs.
+
+## ripgrep — verified against the installed 15.0.0 (`@vscode/ripgrep` 1.18), do not re-derive
+
+- **`.gitignore` is not honoured outside a git checkout.** ripgrep's real default is "apply
+  `.gitignore` only when a `.git` is found above the search root" — a bare `.gitignore` with no
+  repository around it is silently ignored. A scope root need not be a checkout, so `grep.ts`
+  passes **`--no-require-git`** unconditionally. Without it, `list_dir` and `grep` would disagree
+  about what is visible in exactly the scopes where it matters least obviously.
+- **Exit code 1 means "no matches", not failure** (2 is a real error). `execFile` rejects on any
+  nonzero exit, so exit 1 must be unwrapped and treated as a legitimate empty result, or every
+  no-match search becomes a crash.
+- `--no-messages` suppresses per-file read errors but **not** regex parse errors, so the
+  `INVALID_PATTERN` refusal can still rely on reading stderr.
+- Exceeding `maxBuffer` arrives as `code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'` with `killed`
+  *undefined*, so it does not collide with the timeout branch (which keys off `killed`).
+- `data.path` in `--json` output can be `{bytes}` rather than `{text}` for a non-UTF-8 path;
+  skip such a record instead of crashing. One `match` record with several `submatches` is still
+  one matching *line* — do not emit it twice.
 
 ## Conventions already established in code — match them
 

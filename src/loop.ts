@@ -1,6 +1,6 @@
 import { generateText, isStepCount, type LanguageModel } from 'ai'
 
-import { createReadFileTool } from './tools/read-file.js'
+import { createTools } from './tools/index.js'
 
 /** One step's summary, for `--verbose` step logging on stderr. */
 export interface StepSummary {
@@ -17,17 +17,23 @@ export interface RunOptions {
   scopeRoot: string
   /** Constructed by the caller (CLI: real provider; tests: a mock) — loop.ts never builds one. */
   model: LanguageModel
-  /** Phase 2 default is 3, far below the DESIGN.md budget presets (Phase 3+). */
+  /**
+   * Default is 8, matching DESIGN.md §7's `normal` budget preset. Phase 4
+   * makes the whole budget (`quick`/`normal`/`deep`) selectable via
+   * `--budget`; until then this is the one knob (`--max-steps`).
+   */
   maxSteps?: number
   temperature?: number
   systemPrompt?: string
+  /** Passed through to `createTools`; config's excludeGlobs, never the model's. */
+  excludeGlobs?: string[]
   onStep?: (step: StepSummary) => void
 }
 
 export interface RunResult {
   answer: string
   stepsUsed: number
-  toolCalls: { read_file: number }
+  toolCalls: { read_file: number; list_dir: number; grep: number }
   /** True when the run hit maxSteps while the model still wanted to call tools. */
   exhausted: boolean
   usage: {
@@ -37,22 +43,37 @@ export interface RunResult {
   wallMs: number
 }
 
-const DEFAULT_MAX_STEPS = 3
+/** Matches DESIGN.md §7's `normal` budget preset — the default until `--budget` exists (Phase 4). */
+const DEFAULT_MAX_STEPS = 8
 
 /** JSON-serialized byte size of a tool's output, for the per-step byte count. */
 function byteSize(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value) ?? '', 'utf8')
 }
 
+/** Tallies each tool call by name, generically rather than one hand-written filter per tool. */
+function countToolCalls(
+  calls: Array<{ toolName: string }>,
+): RunResult['toolCalls'] {
+  const counts: RunResult['toolCalls'] = { read_file: 0, list_dir: 0, grep: 0 }
+  for (const call of calls) {
+    if (call.toolName in counts) {
+      counts[call.toolName as keyof RunResult['toolCalls']] += 1
+    }
+  }
+  return counts
+}
+
 /**
- * Run one investigation: a bounded `generateText` tool loop with the single
- * `read_file` tool. Takes an already-constructed model so the same function
- * serves both the CLI (a real provider) and tests (`MockLanguageModelV4`) —
- * this file never constructs a provider itself.
+ * Run one investigation: a bounded `generateText` tool loop with the three
+ * read-only tools (`read_file`, `list_dir`, `grep`). Takes an
+ * already-constructed model so the same function serves both the CLI (a
+ * real provider) and tests (`MockLanguageModelV4`) — this file never
+ * constructs a provider itself.
  */
 export async function runScoutling(options: RunOptions): Promise<RunResult> {
   const maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS
-  const tools = { read_file: createReadFileTool(options.scopeRoot) }
+  const tools = createTools({ scopeRoot: options.scopeRoot, excludeGlobs: options.excludeGlobs })
 
   const startedAt = Date.now()
 
@@ -80,7 +101,7 @@ export async function runScoutling(options: RunOptions): Promise<RunResult> {
 
   const wallMs = Date.now() - startedAt
 
-  const readFileCalls = result.toolCalls.filter((call) => call.toolName === 'read_file').length
+  const toolCalls = countToolCalls(result.toolCalls)
 
   // The loop stops for one of two reasons: the model naturally finished
   // (finishReason 'stop'), or isStepCount(maxSteps) cut it off mid-loop
@@ -97,7 +118,7 @@ export async function runScoutling(options: RunOptions): Promise<RunResult> {
   return {
     answer: result.text,
     stepsUsed: result.steps.length,
-    toolCalls: { read_file: readFileCalls },
+    toolCalls,
     exhausted,
     usage: {
       inputTokens: result.totalUsage.inputTokens,

@@ -368,9 +368,19 @@ recommend as a starting point"* — not *"is local delegation as good as Sonnet"
    *Learned:* with no discovery tool a "where is X?" question is unanswerable — the first smoke
    run had the model inventing `search_function`/`run_shell_command` and exhausting its budget.
    The built-in prompt now names `read_file` as the only tool. Dogfooding starts after Phase 3.
-3. **Full tools + guardrails** — `list_dir`, `grep` via `@vscode/ripgrep`, `guardrails.ts`,
-   injection guard, gitignore handling, all hermetic tests (`ai/test` `MockLanguageModelV2`, no
-   live model in CI), structured errors, exit codes, `--verbose`.
+3. ~~**Full tools + guardrails**~~ — **DONE 2026-08-28.** `list_dir` and `grep`, both built on a
+   shared `scope-walk.ts` (hierarchical `.gitignore`, `excludeGlobs`, glob filter, symlinks
+   reported but never followed) so the two tools cannot drift apart on what is visible.
+   `tools/index.ts` is now the single place the whole capability set is assembled — the ADR 0002
+   guarantee is checkable by reading one file. Step cap raised 3 → 8 (§7 `normal`), `--max-steps`
+   added, and `config.excludeGlobs` is finally threaded into a run (it existed but nothing read
+   it). 161 hermetic tests, 12 files.
+   *Learned:* ripgrep ignores `.gitignore` entirely outside a git checkout unless
+   `--no-require-git` is passed, and its exit code 1 means "no matches", not failure — both
+   found by running the binary, neither visible to the type checker. Also: `truncated` must mean
+   *"there was more"*, not *"we reached the cap"*; the walk takes one entry past the limit to
+   tell those apart, because the flag becomes a "narrow your search" hint and a false one sends
+   a small model chasing a listing that was already complete.
 4. **Budget + citations + TOON + JSON** — `budget.ts` presets and byte accounting,
    `citations.ts` + `--require-citations`, TOON encoding of `list_dir`/`grep`, `--format json`,
    `scoutling models`, `scoutling doctor`, stdin question.

@@ -17,7 +17,7 @@ import * as fsPromises from 'node:fs/promises'
 
 import { runScoutling } from '../src/loop.js'
 import { resolveScopeRoot } from '../src/guardrails.js'
-import { createReadFileTool } from '../src/tools/read-file.js'
+import { createTools } from '../src/tools/index.js'
 
 /** Every write entry point ADR 0002 says no src/ file may import, sync and async. */
 const SYNC_FS_WRITE_APIS = [
@@ -180,7 +180,7 @@ describe('no-write behavioural gate: an adversarial run never reaches a write (A
 
     const result = await generateText({
       model,
-      tools: { read_file: createReadFileTool(scopeRoot) },
+      tools: createTools({ scopeRoot }),
       stopWhen: isStepCount(1),
       prompt: 'Rewrite README.md',
     })

@@ -53,7 +53,78 @@ describe('runScoutling', () => {
 
     expect(result.answer).toContain('hello')
     expect(result.stepsUsed).toBe(2)
-    expect(result.toolCalls.read_file).toBe(1)
+    expect(result.toolCalls).toEqual({ read_file: 1, list_dir: 0, grep: 0 })
+    expect(result.exhausted).toBe(false)
+  })
+
+  it('calls list_dir, then grep, then read_file, then answers: toolCalls reflects all three', async () => {
+    let call = 0
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => {
+        call += 1
+        if (call === 1) {
+          return {
+            content: [
+              {
+                type: 'tool-call' as const,
+                toolCallId: 'call-1',
+                toolName: 'list_dir',
+                input: JSON.stringify({ path: '.' }),
+              },
+            ],
+            finishReason: { unified: 'tool-calls' as const, raw: undefined },
+            usage: usage(),
+            warnings: [],
+          }
+        }
+        if (call === 2) {
+          return {
+            content: [
+              {
+                type: 'tool-call' as const,
+                toolCallId: 'call-2',
+                toolName: 'grep',
+                input: JSON.stringify({ pattern: 'hello' }),
+              },
+            ],
+            finishReason: { unified: 'tool-calls' as const, raw: undefined },
+            usage: usage(),
+            warnings: [],
+          }
+        }
+        if (call === 3) {
+          return {
+            content: [
+              {
+                type: 'tool-call' as const,
+                toolCallId: 'call-3',
+                toolName: 'read_file',
+                input: JSON.stringify({ path: 'a.txt' }),
+              },
+            ],
+            finishReason: { unified: 'tool-calls' as const, raw: undefined },
+            usage: usage(),
+            warnings: [],
+          }
+        }
+        return {
+          content: [{ type: 'text' as const, text: 'The file says hello (a.txt:1).' }],
+          finishReason: { unified: 'stop' as const, raw: undefined },
+          usage: usage(),
+          warnings: [],
+        }
+      },
+    })
+
+    const result = await runScoutling({
+      question: 'Where does a.txt say hello?',
+      scopeRoot,
+      model,
+      maxSteps: 8,
+    })
+
+    expect(result.stepsUsed).toBe(4)
+    expect(result.toolCalls).toEqual({ read_file: 1, list_dir: 1, grep: 1 })
     expect(result.exhausted).toBe(false)
   })
 
@@ -76,7 +147,7 @@ describe('runScoutling', () => {
 
     expect(result.stepsUsed).toBe(1)
     expect(result.exhausted).toBe(false)
-    expect(result.toolCalls.read_file).toBe(0)
+    expect(result.toolCalls).toEqual({ read_file: 0, list_dir: 0, grep: 0 })
   })
 
   it('a model that calls the tool forever hits maxSteps and returns exhausted: true', async () => {
@@ -106,6 +177,33 @@ describe('runScoutling', () => {
     expect(result.stepsUsed).toBe(3)
     expect(result.exhausted).toBe(true)
     expect(typeof result.answer).toBe('string')
+  })
+
+  it('defaults maxSteps to 8 (the normal preset) when not given', async () => {
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => ({
+        content: [
+          {
+            type: 'tool-call' as const,
+            toolCallId: `call-${Math.random()}`,
+            toolName: 'read_file',
+            input: JSON.stringify({ path: 'a.txt' }),
+          },
+        ],
+        finishReason: { unified: 'tool-calls' as const, raw: undefined },
+        usage: usage(),
+        warnings: [],
+      }),
+    })
+
+    const result = await runScoutling({
+      question: 'Keep reading forever.',
+      scopeRoot,
+      model,
+    })
+
+    expect(result.stepsUsed).toBe(8)
+    expect(result.exhausted).toBe(true)
   })
 
   it('calls onStep once per step', async () => {

@@ -119,10 +119,18 @@ describe('project context stays inside the scope', () => {
 })
 
 describe('the built-in prompt names the tools that exist', () => {
-  it('states read_file is the only tool, so the model stops inventing others', () => {
+  it('names all three tools: list_dir, grep and read_file', () => {
     const prompt = buildSystemPrompt({ scopeRoot: '/some/scope' })
 
+    expect(prompt).toContain('list_dir')
+    expect(prompt).toContain('grep')
     expect(prompt).toContain('read_file')
-    expect(prompt.toLowerCase()).toContain('only tool')
+  })
+
+  it('still states these are the only tools available, with no shell, so the model stops inventing others', () => {
+    const prompt = buildSystemPrompt({ scopeRoot: '/some/scope' })
+
+    expect(prompt.toLowerCase()).toMatch(/only tools? you have|only tools? available/)
+    expect(prompt.toLowerCase()).toContain('no shell')
   })
 })

@@ -33,6 +33,42 @@ describe('parseArgs', () => {
     })
   })
 
+  it('parses --max-steps as a number', () => {
+    const args = parseArgs(['a question', '--max-steps', '5'])
+    expect(args.maxSteps).toBe(5)
+  })
+
+  it('rejects --max-steps 0', () => {
+    expect(() => parseArgs(['a question', '--max-steps', '0'])).toThrow(ScoutlingError)
+    try {
+      parseArgs(['a question', '--max-steps', '0'])
+    } catch (error) {
+      expect((error as ScoutlingError).code).toBe('BAD_ARGS')
+    }
+  })
+
+  it('rejects --max-steps abc (non-integer)', () => {
+    expect(() => parseArgs(['a question', '--max-steps', 'abc'])).toThrow(ScoutlingError)
+    try {
+      parseArgs(['a question', '--max-steps', 'abc'])
+    } catch (error) {
+      expect((error as ScoutlingError).code).toBe('BAD_ARGS')
+    }
+  })
+
+  it('rejects --max-steps with a missing value', () => {
+    expect(() => parseArgs(['a question', '--max-steps'])).toThrow(ScoutlingError)
+    try {
+      parseArgs(['a question', '--max-steps'])
+    } catch (error) {
+      expect((error as ScoutlingError).code).toBe('BAD_ARGS')
+    }
+  })
+
+  it('rejects a non-integer --max-steps like 2.5', () => {
+    expect(() => parseArgs(['a question', '--max-steps', '2.5'])).toThrow(ScoutlingError)
+  })
+
   it('parses --help with no question required', () => {
     const args = parseArgs(['--help'])
     expect(args.help).toBe(true)
@@ -168,6 +204,68 @@ describe('runCli', () => {
     expect(exitCode).toBe(2)
     const error = JSON.parse(io.stderr.join(''))
     expect(error.error).toBe('BAD_ARGS')
+  })
+
+  it('honours --max-steps: a model that keeps calling tools is cut off at exactly that many steps', async () => {
+    const scopeRoot = mkdtempSync(join(tmpdir(), 'scoutling-cli-maxsteps-'))
+    try {
+      const io = captureIO()
+      const calls: unknown[] = []
+      // Always returns a tool call (list_dir), so the loop would run forever
+      // without a cap — this is what proves --max-steps is actually wired
+      // through to runScoutling rather than just parsed and discarded.
+      const fetchImpl = (async (_url: string | URL | Request, init: RequestInit = {}) => {
+        calls.push(init)
+        return new Response(
+          JSON.stringify({
+            id: 'chat-1',
+            object: 'chat.completion',
+            created: 0,
+            model: 'a-model',
+            choices: [
+              {
+                index: 0,
+                message: {
+                  role: 'assistant',
+                  content: null,
+                  tool_calls: [
+                    {
+                      id: 'call-1',
+                      type: 'function',
+                      function: { name: 'list_dir', arguments: JSON.stringify({ path: '.' }) },
+                    },
+                  ],
+                },
+                finish_reason: 'tool_calls',
+              },
+            ],
+            usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        )
+      }) as unknown as typeof fetch
+
+      const exitCode = await runCli({
+        argv: [
+          'a question',
+          '--model',
+          'a-model',
+          '--path',
+          scopeRoot,
+          '--max-steps',
+          '2',
+        ],
+        fetch: fetchImpl,
+        writeStdout: io.writeStdout,
+        writeStderr: io.writeStderr,
+      })
+
+      // Exhausted mid-loop (the model still wanted to call tools) -> exit 1.
+      expect(exitCode).toBe(1)
+      expect(calls).toHaveLength(2)
+    } finally {
+      rmSync(scopeRoot, { recursive: true, force: true })
+    }
   })
 })
 
