@@ -27,7 +27,7 @@ Read, in this order, before changing anything:
   model alias or installed binary. If a default would only be right on one machine, it is not a
   default — it is a config-file example.
 - **Packaging** follows the `ts-library` skill: ESM, single bundled entry, `bin` → `scoutling`,
-  Node ≥ 20, `npm publish --provenance` from CI on tags.
+  Node ≥ 22, `npm publish --provenance` from CI on tags.
 - Commit small and often on `main` with conventional-ish messages; push after each green phase.
 
 ## Skills installed here (`skills-lock.json`, restore: `npx skills experimental_install`)

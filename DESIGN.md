@@ -14,7 +14,7 @@ out X about this repo" to a local (or any OpenAI-compatible) model — and get a
 
 - npm: `scoutling` (verified free 2026-08-27; zero exact-name repos on GitHub)
 - License: MIT
-- Runtime: Node ≥ 20, `npx scoutling "<question>"` zero-install
+- Runtime: Node ≥ 22, `npx scoutling "<question>"` zero-install
 - Repo: `~/workspace/scoutling` (standalone; **not** inside `local-ai`)
 - Status: design final, implementation not started
 
@@ -75,7 +75,7 @@ gptme, mods, llm, codescout (84★), recce (476★ dbt tool), legwork, gander, d
 ```
 scoutling/
   package.json  tsconfig.json  tsup.config.ts  LICENSE (MIT)  README.md  DESIGN.md  CHANGELOG.md
-  .github/workflows/ci.yml        # node 20 + 22 × ubuntu/macos/windows; hermetic tests (mock model)
+  .github/workflows/ci.yml        # node 22 + 24 × ubuntu/macos/windows; hermetic tests (mock model)
   .github/workflows/release.yml   # on tag: build, test, npm publish --provenance
   src/
     cli.ts            # entry (`#!/usr/bin/env node`); hand-rolled arg parsing, subcommands
@@ -387,7 +387,7 @@ delegation rule; review, eval grading and the README claims stay in the main loo
   shows real tool calls.
 - Failure paths: `--base-url http://localhost:1/v1` → fast `PROVIDER_UNREACHABLE` (exit 3), no
   hang; `--timeout-ms 1000` → `TIMEOUT` (exit 4) with the cold-load hint.
-- Cross-platform CI: ubuntu/macos/windows × node 20/22 (the `@vscode/ripgrep` postinstall is
+- Cross-platform CI: ubuntu/macos/windows × node 22/24 (the `@vscode/ripgrep` postinstall is
   the main cross-platform risk; CI proves it).
 
 ## 15. Future ideas (post-v0.1, roughly by value ÷ effort)
@@ -435,7 +435,7 @@ delegation rule; review, eval grading and the README claims stay in the main loo
 | 2026-08-27 | Generic OpenAI-compatible provider, no gateway/alias coupling | Portability is the product; the `local-ai` gateway is one config among many. |
 | 2026-08-27 | `@vscode/ripgrep` instead of system `rg` | `rg` isn't a system binary on the reference machine (Claude Code shell shim only); npm-bundled binary is portable incl. Windows. |
 | 2026-08-27 | TOON for tool results only, not for the caller-facing answer | Prose isn't tabular; a second extraction pass re-coupled to a gateway alias was the earlier design's mistake. |
-| 2026-08-27 | Name `scoutling`, MIT, Node ≥ 20 via npx, standalone repo | Zero name collisions on npm + GitHub; maximum adoption; matches the "portable" goal. |
+| 2026-08-27 | Name `scoutling`, MIT, Node ≥ 22 via npx, standalone repo | Zero name collisions on npm + GitHub; maximum adoption; matches the "portable" goal. |
 | 2026-08-27 | Reserve npm name with a 0.0.1 placeholder before code exists | Name was free 2026-08-27; cheap insurance. |
 | 2026-08-27 | GitHub `plavjanik/scoutling`, public from the first commit | Build in the open; simplest provenance story. |
 | 2026-08-27 | README tells the origin story + eval numbers, but no `local-ai` repo specifics | The 9 eval questions and Signals-app facts stay in `local-ai/docs/scoutling-eval.json`. |
@@ -444,3 +444,4 @@ delegation rule; review, eval grading and the README claims stay in the main loo
 | 2026-08-27 | GoT "little birds" as tagline, not package name | `littlebird` taken on npm; `little-birds` free but 11 repos incl. an adjacent local-AI monitor; plural is awkward as a command. Flavour lives in the README. |
 | 2026-08-27 | Citations verified structurally, `--require-citations` opt-in | The one contract competitors lack; zero extra model cost. |
 | 2026-08-27 | Eval models: next-80b, coder-next, qwen3.8-27b, qwen3.6-35b-a3b | Verified LM Studio IDs; the earlier `qwen3-coder-30b` doesn't exist. |
+| 2026-08-28 | Node floor raised 20 → 22 (runtime and toolchain) | Node 20 reached end-of-life 2026-04-30, so shipping `engines: >=20` advertised an unpatched runtime. It also blocked CI: tsdown declares `node ^22.18.0 \|\| >=24.11.0` and its config loader is unavailable below that, so every node-20 build job failed while every node-22 one passed. CI matrix is now 22 + 24, the two lines still receiving security patches. |

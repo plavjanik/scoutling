@@ -20,7 +20,7 @@ jobs:
         # The bundled ripgrep resolves a different per-platform package on each
         # of these, so the matrix is what proves search works off the reference machine.
         os: [ubuntu-latest, macos-latest, windows-latest]
-        node: [20, 22]
+        node: [22, 24]
     steps:
       - uses: actions/checkout@v4
 

@@ -3,7 +3,7 @@ import { defineConfig } from 'tsdown'
 export default defineConfig({
   entry: ['src/index.ts', 'src/cli.ts'],
   format: ['esm'],
-  target: 'node20',
+  target: 'node22',
   dts: true,
   clean: true,
   // The package is `type: module`, so plain `.js` is already ESM — keep the
