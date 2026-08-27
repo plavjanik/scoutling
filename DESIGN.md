@@ -79,7 +79,7 @@ scoutling/
   .github/workflows/release.yml   # on tag: build, test, npm publish --provenance
   src/
     cli.ts            # entry (`#!/usr/bin/env node`); hand-rolled arg parsing, subcommands
-    config.ts         # precedence: flag > SCOUTLING_* env > scoutling.config.json > built-in
+    config.ts         # layered: flag > env > config.local.json > config.json > ~/.config > built-in (§5)
     provider.ts       # createOpenAICompatible({ baseURL, apiKey, supportsStructuredOutputs })
     loop.ts           # runScoutling(): generateText + stopWhen: stepCountIs(N) + byte budget + timeout
     prompt.ts         # default system prompt; contextFiles injection (realpath-deduped, capped)
@@ -125,11 +125,30 @@ while-loop.
 
 ## 5. Configuration
 
-Precedence: **CLI flag > `SCOUTLING_*` env > `scoutling.config.json` (in `--path`/cwd; no
-upward walk in v1) > built-in default.**
+Precedence, highest first — each layer overrides individual keys of the ones below it (shallow
+merge; arrays replace, not concatenate):
+
+1. **CLI flag**
+2. **`SCOUTLING_*` env var** (`SCOUTLING_MODEL`, `SCOUTLING_BASE_URL`, `SCOUTLING_API_KEY`,
+   `SCOUTLING_BUDGET`, …)
+3. **`scoutling.config.local.json`** — per-repo, **gitignored**, per-developer. This is where
+   each person pins the model/base URL that fits *their* machine (a 16 GB laptop runs
+   `qwen/qwen3.6-35b-a3b`, the Mac Studio runs `qwen/qwen3-next-80b`) without fighting over
+   the checked-in file.
+4. **`scoutling.config.json`** — per-repo, checked in, the team's shared non-secret defaults
+   (`contextFiles`, `excludeGlobs`, `budget`, a *suggested* model).
+5. **`~/.config/scoutling/config.json`** (`$XDG_CONFIG_HOME` respected) — per-user, machine-wide
+   defaults that follow the developer across every repo: typically just `baseUrl` + `model`.
+6. **Built-in defaults** — `baseUrl: http://localhost:1234/v1`, `budget: normal`,
+   `contextFiles: []`, no model.
+
+Both repo files are looked up in `--path` (default cwd) only — no upward directory walk in v1.
+`scoutling doctor` prints the resolved config **and which layer each key came from**, so "why
+is it using that model?" is a one-command answer. `scoutling init` (v1.1) appends
+`scoutling.config.local.json` to `.gitignore`; until then the README says to.
 
 ```jsonc
-// scoutling.config.json — checked into the repo scoutling runs *in*, non-secret
+// scoutling.config.json — checked into the repo scoutling runs *in*, non-secret, shared
 {
   "baseUrl": "http://localhost:1234/v1",     // built-in default = LM Studio
   "model": "qwen/qwen3-next-80b",            // no built-in default; required via flag/env/config
@@ -142,8 +161,15 @@ upward walk in v1) > built-in default.**
 }
 ```
 
-- `SCOUTLING_API_KEY` is the only secret; goes in `.env` (gitignored) or the environment. LM
-  Studio/Ollama don't need one (`not-needed` default).
+```jsonc
+// scoutling.config.local.json — gitignored, this developer's machine
+{ "model": "qwen/qwen3.6-35b-a3b", "baseUrl": "http://localhost:11434/v1" }
+```
+
+- `SCOUTLING_API_KEY` is the only secret; goes in `.env` (gitignored), the environment, or
+  `scoutling.config.local.json` / the user-level file (both are outside version control). Never
+  in the checked-in file — the loader warns if it finds `apiKey` there. LM Studio/Ollama don't
+  need one (`not-needed` default).
 - **`--model` is the only hard requirement** when no config file is present. Which models exist
   varies per machine, so a baked-in default would itself be a portability leak.
 - `AGENTS.md` → `CLAUDE.md` is a symlink in `local-ai`; the loader dedupes context files by
@@ -222,7 +248,8 @@ scoutling "<question>" [--model <id>] [--base-url <url>] [--api-key <k>]
           [--format text|json] [--require-citations] [--verbose] [--no-context]
 scoutling -                   # read the question from stdin (long prompts from a parent agent)
 scoutling models              # GET <base-url>/models — what can I pass to --model?
-scoutling doctor              # base-url reachable? model present? rg binary ok? context length?
+scoutling doctor              # resolved config + which layer set each key; base-url reachable?
+                              # model present? rg binary ok? context length?
 scoutling init <claude-code|codex|opencode|cursor>   # v1.1 — writes the integration file
 ```
 
@@ -404,6 +431,7 @@ delegation rule; review, eval grading and the README claims stay in the main loo
 | 2026-08-27 | GitHub `plavjanik/scoutling`, public from the first commit | Build in the open; simplest provenance story. |
 | 2026-08-27 | README tells the origin story + eval numbers, but no `local-ai` repo specifics | The 9 eval questions and Signals-app facts stay in `local-ai/docs/scoutling-eval.json`. |
 | 2026-08-27 | Git tools deferred to v0.2 | Keep v1 to the 3 tools the eval exercises; add `git_log`/`git_blame`/`git_diff` once the loop is proven. |
+| 2026-08-27 | Config layers: flag > env > `scoutling.config.local.json` (gitignored) > `scoutling.config.json` (checked in) > `~/.config/scoutling/config.json` > built-in | Every developer needs a model that fits their own machine without editing the shared file; `doctor` shows provenance per key. |
 | 2026-08-27 | GoT "little birds" as tagline, not package name | `littlebird` taken on npm; `little-birds` free but 11 repos incl. an adjacent local-AI monitor; plural is awkward as a command. Flavour lives in the README. |
 | 2026-08-27 | Citations verified structurally, `--require-citations` opt-in | The one contract competitors lack; zero extra model cost. |
 | 2026-08-27 | Eval models: next-80b, coder-next, qwen3.8-27b, qwen3.6-35b-a3b | Verified LM Studio IDs; the earlier `qwen3-coder-30b` doesn't exist. |

@@ -3,5 +3,6 @@ dist/
 out/
 eval/results/
 .env
+scoutling.config.local.json
 .DS_Store
 *.log
