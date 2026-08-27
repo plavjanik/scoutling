@@ -8,7 +8,7 @@ Tagline (README/npm description): *"Your little birds for the codebase — a rea
 investigator that any coding agent can send ahead, on any local model."* (Varys' little birds
 report what they saw; unlike his, these cite their sources and never act.)
 
-**One-liner:** a bounded, read-only, multi-turn investigator CLI that any coding agent (Claude
+**One-liner:** a bounded, read-only, multi-step investigator CLI that any coding agent (Claude
 Code, Codex CLI, OpenCode, Cursor, a human in a terminal) can shell out to, to delegate "go find
 out X about this repo" to a local (or any OpenAI-compatible) model — and get a cited answer back.
 
@@ -201,15 +201,15 @@ is it using that model?" is a one-command answer. `scoutling init` (v1.1) append
 
 ## 7. Budget — one dial, several caps underneath
 
-| preset | maxTurns | maxToolOutputBytes | timeoutMs | maxOutputTokens |
+| preset | maxSteps | maxToolOutputBytes | timeoutMs | maxOutputTokens |
 |---|---|---|---|---|
 | `quick` | 4 | 16 000 | 90 000 | 4 000 |
 | `normal` (default) | 8 | 40 000 | 180 000 | 10 000 |
 | `deep` | 15 | 120 000 | 420 000 | 16 000 |
 
-Any individual cap is overridable (`--max-turns`, `--max-tool-bytes`, `--timeout-ms`).
+Any individual cap is overridable (`--max-steps`, `--max-tool-bytes`, `--timeout-ms`).
 
-- **Turns alone don't bound cost.** 8 turns × 400-line reads can blow a small local context
+- **Steps alone don't bound cost.** 8 steps × 400-line reads can blow a small local context
   mid-loop. `budget.ts` tracks cumulative tool-result bytes; past the cap, further results are
   replaced with `"[budget exhausted — synthesize from what you have]"`.
 - **`maxOutputTokens` is set explicitly** — reasoning-capable local models need ≥10 k in tool
@@ -221,7 +221,7 @@ Any individual cap is overridable (`--max-turns`, `--max-tool-bytes`, `--timeout
   System prompt + 4 k of `CLAUDE.md` + one 400-line read exceeds that. `scoutling doctor` (§9)
   warns when it can read the loaded context length; README says "set ≥ 32 k for the model you
   point scoutling at".
-- On budget/turn exhaustion the answer is still returned, flagged `exhausted: true`, with a
+- On budget exhaustion (any cap, steps included) the answer is still returned, flagged `exhausted: true`, with a
   next-step hint ("narrow `--path` or ask a more specific question"); exit code 1, not 0.
 
 ## 8. The cited-answer contract
@@ -244,7 +244,7 @@ differentiator nobody else has; it is also exactly what a parent agent needs to 
 
 ```
 scoutling "<question>" [--model <id>] [--base-url <url>] [--api-key <k>]
-          [--path <dir>] [--budget quick|normal|deep] [--max-turns N] [--timeout-ms N]
+          [--path <dir>] [--budget quick|normal|deep] [--max-steps N] [--timeout-ms N]
           [--format text|json] [--require-citations] [--verbose] [--no-context]
 scoutling -                   # read the question from stdin (long prompts from a parent agent)
 scoutling models              # GET <base-url>/models — what can I pass to --model?
