@@ -1,0 +1,42 @@
+{
+  "name": "scoutling",
+  "version": "0.0.1",
+  "description": "Your little birds for the codebase — a read-only, bounded investigator that any coding agent can send ahead, on any local OpenAI-compatible model.",
+  "license": "MIT",
+  "author": "Petr Plavjanik",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/plavjanik/scoutling.git"
+  },
+  "homepage": "https://github.com/plavjanik/scoutling#readme",
+  "bugs": "https://github.com/plavjanik/scoutling/issues",
+  "keywords": [
+    "cli",
+    "agent",
+    "subagent",
+    "claude-code",
+    "codex",
+    "opencode",
+    "cursor",
+    "llm",
+    "local-llm",
+    "lm-studio",
+    "ollama",
+    "openai-compatible",
+    "read-only",
+    "codebase",
+    "investigation",
+    "toon"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}
