@@ -107,10 +107,19 @@ scoutling/
     budget.md  citations.md  eval.md
 ```
 
-**Dependencies (runtime):** `ai` ^5, `@ai-sdk/openai-compatible` ^1, `zod`, `@toon-format/toon`
-^4.1, `@vscode/ripgrep` ^1.18, `ignore` (gitignore matching). **Dev:** `typescript` ^5.7,
-`tsup`, `tsx`, `vitest` ^2. Bundle with tsup to one ESM file so `npx` startup is fast;
-`@vscode/ripgrep` stays external (it downloads a per-platform binary on install).
+**Dependencies (runtime):** `ai` **^7** (7.0.83 as of 2026-08-27 — the `local-ai` examples are
+on v5; follow the installed `ai-sdk` skill for the v7 API, not those examples verbatim),
+`@ai-sdk/openai-compatible` ^3, `zod`, `@toon-format/toon` ^4.1, `@vscode/ripgrep` ^1.18,
+`ignore` (gitignore matching). **Dev:** `typescript` ^5.7, `tsdown` (or `tsup` — the
+`ts-library` skill's call), `tsx`, `vitest` ^2. Bundle to one ESM file so `npx` startup is fast;
+`@vscode/ripgrep` stays external (it downloads a per-platform binary on install). The hermetic
+test mock is whatever `ai/test` exports in v7 (v5 called it `MockLanguageModelV2`).
+
+**Skills installed for agents working on this repo** (project-scoped via `npx skills`, pinned in
+`skills-lock.json`, restored with `npx skills experimental_install`): `axi` (agent-facing CLI
+ergonomics — the spec §9 follows), `ai-sdk` (official Vercel, v7 API), `vitest`, `ts-library`
+(packaging/publishing), and mattpocock's `domain-modeling` (owns `CONTEXT.md` + `docs/adr/`),
+`tdd`, `codebase-design`.
 
 **Why `@vscode/ripgrep` and not system `rg`:** on the reference machine `rg` is *not* a system
 binary — `which rg` resolves to a Claude Code shell function proxying to Claude's bundled
