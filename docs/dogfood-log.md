@@ -27,6 +27,8 @@ Verdict is one of:
 |---|---|---|---|---|---|---|---|
 | 2026-08-28 | scoutling | "What does resolvePath do outside the scope root, and where is that handled?" | qwen/qwen3-coder-next | 3/3 | yes | gave up | Invented `search_function` and `run_shell_command`, burned 2 of 3 steps on tool-not-found. No discovery tool exists in Phase 2, so "where is X" is unanswerable by construction. Fixed the invention half by naming `read_file` as the only tool in the prompt; the rest needs `grep`/`list_dir` (Phase 3). |
 | 2026-08-28 | scoutling | "Read src/guardrails.ts and explain resolvePath's out-of-scope behaviour. Cite path:line." | qwen/qwen3-coder-next | 2/3 | no | useful | One read (4,946 bytes), then answered. All four citations (63–64, 66, 67–72) verified correct by hand. |
+| 2026-08-28 | scoutling | "Where is the guard that stops a grep pattern being parsed as a ripgrep flag, and what does it do?" | qwen/qwen3-coder-next | 5/8 | no | useful | **First run of a question Phase 2 could not answer at all** — no file named, so it had to find one. grep → two parallel reads → paged read → read DESIGN.md → answered. All six citations (`grep.ts:206`, `grep.ts:177-188`, and three test line ranges) verified exact by hand. ~33 KB of tool output, 3m20s. |
+| 2026-08-28 | scoutling | "How does walkScope decide a listing was truncated, and why is it done that way?" | qwen/qwen3-coder-next | 4/8 | no | useful | grep → full read of `scope-walk.ts` → paged read of its test → answered. Explained the limit+1 ceiling correctly, including *why*, and found the mirrored comment in `grep.ts` unprompted. All five citations verified exact. ~22 KB of tool output. |
 
 ## Open observations
 
@@ -37,3 +39,11 @@ Verdict is one of:
 - **Verify before acting.** Using scoutling to build scoutling means a wrong answer can be acted
   on. Every citation gets checked against the file before it changes code — a *wrong* row in the
   table above is worth more than a silently-corrected one.
+- **Bytes bind before steps do (Phase 3 observation, 2 runs).** Both post-Phase-3 runs finished
+  well inside the 8-step cap (5 and 4) but pulled ~33 KB and ~22 KB of tool output — the first
+  is already 83 % of the `normal` preset's 40 KB. Steps are not the scarce resource; bytes are.
+  A single `read_file` of a 340-line source file cost 16 KB, and one step issuing two parallel
+  reads cost 24.7 KB on its own. Two consequences for Phase 4: `budget.ts` byte accounting has
+  to charge a *step*, not a call, since the model does issue parallel reads; and the preset byte
+  caps should be tuned against these numbers rather than the step counts, which have headroom to
+  spare. Worth re-measuring on a scope larger than this one before treating it as settled.
