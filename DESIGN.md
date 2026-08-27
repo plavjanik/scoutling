@@ -360,10 +360,14 @@ recommend as a starting point"* — not *"is local delegation as good as Sonnet"
 
 ## 13. Phasing
 
-1. **Repo bootstrap** — `package.json`, tsconfig (copy of `local-ai/tools/gmail-cleanup`'s:
-   ES2022/NodeNext/strict), tsup, vitest, MIT, CI matrix, this doc. `provider.ts`, `config.ts`.
-2. **Minimal loop** — `read_file` only, `stepCountIs(3)`, `cli.ts` with `<question> --model
-   --path`. Smoke test against LM Studio directly: connectivity + tool-calling end to end.
+1. ~~**Repo bootstrap**~~ — **DONE 2026-08-28.** `package.json`, tsconfig (ES2022/NodeNext/strict),
+   **tsdown** (not tsup), vitest 4, MIT, CI matrix, this doc. `provider.ts`, `config.ts`.
+2. ~~**Minimal loop**~~ — **DONE 2026-08-28.** `read_file` only, `isStepCount(3)`, `cli.ts` with
+   `<question> --model --path`. Smoke against LM Studio passed on `qwen/qwen3-coder-next`: 2
+   steps, one read, four citations verified correct by hand. 85 hermetic tests.
+   *Learned:* with no discovery tool a "where is X?" question is unanswerable — the first smoke
+   run had the model inventing `search_function`/`run_shell_command` and exhausting its budget.
+   The built-in prompt now names `read_file` as the only tool. Dogfooding starts after Phase 3.
 3. **Full tools + guardrails** — `list_dir`, `grep` via `@vscode/ripgrep`, `guardrails.ts`,
    injection guard, gitignore handling, all hermetic tests (`ai/test` `MockLanguageModelV2`, no
    live model in CI), structured errors, exit codes, `--verbose`.
