@@ -37,6 +37,12 @@ today, with a comment at each return site saying Phase 4 owns it), `--format jso
   live provider in `pnpm test`. Live checks are a separate `pnpm smoke` script.
 - **Read-only is structural.** No file in `src/` imports a filesystem write API. `no-write` test
   is a permanent gate.
+- **A test must prove the path it claims.** Where a fallback or second code path can produce the
+  same observable result, assert *which one ran*. The Phase 3 end-to-end injection test matched
+  the literal `--pre=sh` — but so would the JS fallback, so it passed without exercising ripgrep
+  at all until it asserted `engine === 'ripgrep'`. The same rot hits fixed premises: the smoke
+  question named its file because Phase 2 had no discovery tool, and kept "passing" after that
+  stopped being true. When a phase changes what is possible, re-read what the checks assume.
 - **Agent-facing CLI ergonomics** follow the `axi` skill: structured one-line JSON errors with
   codes on stderr, definitive empty states, next-step hints, no interactive prompts, exit codes
   per DESIGN.md §9.
@@ -62,13 +68,19 @@ These cost real time to discover; the type checker does not catch the first two.
   aggregated result.
 - A tool `execute()` that **throws** reaches the model as `JSON.stringify(error)`, which drops
   an `Error`'s non-enumerable `message`. So tools **return** a refusal object
-  `{error, message, hint?}` — one shape for every refusal — instead of throwing. Follow that in
-  `list_dir`/`grep`.
+  `{error, message, hint?}` — one shape for every refusal — instead of throwing. All three tools
+  do this; keep any new one consistent, so a small model learns one error shape, not one per
+  failure mode.
 - An unknown tool call is caught in `parseToolCall()` as `AI_NoSuchToolError` and surfaced to
   the model as a `tool-error` part. Confirmed empirically: the model gets "tool not found",
   never a write.
 - Vitest cannot `vi.spyOn` Node ESM built-ins ("Module namespace is not configurable"). Use
   `vi.mock('node:fs', { spy: true })`, which spies while the real implementation still runs.
+- **`vi.unmock` is hoisted exactly like `vi.mock`**, so calling it in a `describe` body to
+  un-mock one module for one test silently disables the mock for the *whole file* before any
+  test runs. When most of a file is mocked but one test needs the real thing (as in
+  `grep-injection.test.ts`), use the non-hoisted `vi.doUnmock(...)` inside the `it()` body,
+  then `vi.resetModules()` and re-import the module dynamically.
 
 ## ripgrep — verified against the installed 15.0.0 (`@vscode/ripgrep` 1.18), do not re-derive
 
@@ -94,6 +106,21 @@ These cost real time to discover; the type checker does not catch the first two.
   config-supplied path** (a hostile repo's committed `scoutling.config.json` is untrusted input).
 - `runCli` takes argv, env, cwd, `fetch` and the stdout/stderr writers as parameters and returns
   an exit code; it never calls `process.exit`. Keep it that way — it is why the CLI is testable.
+- Every tool is a **factory that binds the scope root at construction** — never a model-supplied
+  argument, so a model cannot widen its own scope. Config-supplied options (`excludeGlobs`, the
+  injectable `rgPath`) bind the same way.
+- `tools/index.ts` is the **single assembly point** for the capability set: one file to read to
+  verify the ADR 0002 guarantee. Its `ToolSet` is deliberately a `type`, not an `interface` —
+  a type alias with only known properties is assignable to the SDK's `Record<string, Tool>`,
+  whereas an interface needs an explicit `[toolName: string]: Tool` index signature, which would
+  state that any key may map to a tool and would silence the excess-property check that makes
+  adding a write member an error.
+- **A cap flag means "there was more", not "we reached the limit".** `walkScope` and `grep` both
+  collect one item past the cap so they can tell those apart. The flag becomes a "narrow your
+  search" hint, and a false one sends a small model chasing a listing that was already complete.
+- **Never degrade silently.** The JS search fallback runs only when the ripgrep binary is
+  genuinely missing; every other ripgrep failure is a refusal, and the result always carries
+  `engine`. Answering with a weaker engine without saying so is how a wrong answer looks right.
 - Emoji (🐦) on human-facing surfaces only: README, DESIGN, npm description, `--help`. Never on
   stdout answers, the one-line JSON errors or the `--verbose` step log — parent agents parse those.
 - Toolchain reality: **vitest 4** (not ^2), **tsdown needs Node ^22.18 || >=24.11 to build**, and
@@ -119,4 +146,7 @@ from the lockfile. Keep it truthful about which flags actually exist.
 - Reference machine runs LM Studio on `http://localhost:1234/v1`; verified model ids for smoke
   tests: `qwen/qwen3-coder-next` (fast), `qwen/qwen3-next-80b`, `qwen/qwen3.8-27b`,
   `qwen/qwen3.6-35b-a3b`. Put your own in `scoutling.config.local.json` (gitignored).
+- A real run on `qwen/qwen3-coder-next` against this repo takes **~3.5 minutes** and 4-5 of its 8
+  steps; `pnpm smoke` allows 300s for that reason. Budget wall-clock accordingly before assuming
+  a live run has hung.
 - `pnpm` is the package manager.
