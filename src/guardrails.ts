@@ -44,8 +44,14 @@ export function resolveScopeRoot(path: string): string {
  * give a "file not found" message distinct from "outside scope".
  */
 export function resolvePath(scopeRoot: string, candidate: string): string {
+  // Canonicalize the root as well as the candidate. Callers are supposed to
+  // pass an already-resolved root, but a root that slipped through
+  // un-canonicalized (macOS hands out temp dirs under /var, a symlink to
+  // /private/var) would otherwise fail the containment check for *every*
+  // path — and callers treat a rejection as "skip", so the failure is silent.
+  const realScopeRoot = realpathSync(scopeRoot)
   const normalized = normalize(candidate)
-  const absoluteCandidate = isAbsolute(normalized) ? normalized : join(scopeRoot, normalized)
+  const absoluteCandidate = isAbsolute(normalized) ? normalized : join(realScopeRoot, normalized)
 
   const realBase = realpathNearestAncestor(absoluteCandidate)
   // Re-attach whatever suffix of the original path was beyond the realpath'd
@@ -54,14 +60,14 @@ export function resolvePath(scopeRoot: string, candidate: string): string {
   const suffix = absoluteCandidate.slice(realBase.ancestor.length)
   const resolved = suffix.length > 0 ? join(realBase.real, suffix) : realBase.real
 
-  const withTrailingSep = scopeRoot.endsWith(sep) ? scopeRoot : scopeRoot + sep
-  const isInsideScope = resolved === scopeRoot || resolved.startsWith(withTrailingSep)
+  const withTrailingSep = realScopeRoot.endsWith(sep) ? realScopeRoot : realScopeRoot + sep
+  const isInsideScope = resolved === realScopeRoot || resolved.startsWith(withTrailingSep)
 
   if (!isInsideScope) {
     throw new ScoutlingError(
       'PATH_NOT_FOUND',
       `Path escapes the scope root: ${candidate}`,
-      `Only paths inside ${scopeRoot} are accessible.`,
+      `Only paths inside ${realScopeRoot} are accessible.`,
     )
   }
 

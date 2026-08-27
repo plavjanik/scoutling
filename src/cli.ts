@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readFileSync } from 'node:fs'
+import { pathToFileURL } from 'node:url'
 import { APICallError, RetryError } from 'ai'
 
 import { loadConfig } from './config.js'
@@ -251,15 +252,31 @@ export async function runCli(io: CliIO): Promise<number> {
   }
 }
 
-async function main(): Promise<void> {
-  const exitCode = await runCli({ argv: process.argv.slice(2) })
-  process.exit(exitCode)
+/**
+ * Is this module the program being executed, rather than one imported by a
+ * test or another package?
+ *
+ * Must compare real file URLs, not interpolate a path into a `file://`
+ * string: an install path containing a space (an npx cache directory, a
+ * `My Documents`) percent-encodes in `import.meta.url` but not in a naive
+ * template, and a Windows path uses backslashes and a drive letter. Either
+ * mismatch makes the comparison silently false, so the CLI would exit 0
+ * having printed nothing at all.
+ */
+export function isDirectEntry(importMetaUrl: string, argv1: string | undefined): boolean {
+  if (argv1 === undefined) return false
+  return importMetaUrl === pathToFileURL(argv1).href
 }
 
-// Only run when executed directly (`scoutling ...`), not when imported by tests.
-if (import.meta.url === `file://${process.argv[1]}`) {
+async function main(): Promise<void> {
+  // Set the code rather than calling process.exit(), which can truncate a
+  // still-draining stdout — and stdout is the whole product here.
+  process.exitCode = await runCli({ argv: process.argv.slice(2) })
+}
+
+if (isDirectEntry(import.meta.url, process.argv[1])) {
   main().catch((error: unknown) => {
     console.error(JSON.stringify({ error: 'INTERNAL', message: String(error) }))
-    process.exit(10)
+    process.exitCode = 10
   })
 }

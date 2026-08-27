@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 
 import { buildSystemPrompt } from '../src/prompt.js'
 
@@ -100,5 +100,29 @@ describe('buildSystemPrompt', () => {
 
       expect(prompt).toBe('You are a custom auditor. Only answer yes or no.')
     })
+  })
+})
+
+describe('project context stays inside the scope', () => {
+  it('skips a context file that escapes the scope root', () => {
+    const scopeRoot = mkdtempSync(join(tmpdir(), 'scoutling-prompt-scope-'))
+    const outsideDir = mkdtempSync(join(tmpdir(), 'scoutling-prompt-outside-'))
+    writeFileSync(join(outsideDir, 'secret.txt'), 'SUPER-SECRET-VALUE')
+    const escaping = relative(scopeRoot, join(outsideDir, 'secret.txt'))
+
+    const prompt = buildSystemPrompt({ scopeRoot, contextFiles: [escaping] })
+
+    expect(prompt).not.toContain('SUPER-SECRET-VALUE')
+    rmSync(scopeRoot, { recursive: true, force: true })
+    rmSync(outsideDir, { recursive: true, force: true })
+  })
+})
+
+describe('the built-in prompt names the tools that exist', () => {
+  it('states read_file is the only tool, so the model stops inventing others', () => {
+    const prompt = buildSystemPrompt({ scopeRoot: '/some/scope' })
+
+    expect(prompt).toContain('read_file')
+    expect(prompt.toLowerCase()).toContain('only tool')
   })
 })

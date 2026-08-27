@@ -13,8 +13,14 @@ import { runCli } from '../src/cli.js'
 
 const BASE_URL = process.env.SCOUTLING_BASE_URL ?? 'http://localhost:1234/v1'
 const MODEL = process.env.SCOUTLING_MODEL ?? 'qwen/qwen3-coder-next'
+// The question names the file on purpose. Phase 2 ships read_file and nothing
+// else — no list_dir, no grep — so the model has no way to *find* a file, and
+// an open "where is X handled?" question is unanswerable by construction until
+// Phase 3. What this smoke proves is DESIGN.md §13's actual Phase 2 goal:
+// connectivity and tool-calling end to end against a real provider.
 const QUESTION =
-  'What does resolvePath do when given a path outside the scope root, and where is that handled?'
+  'Read src/guardrails.ts and explain what resolvePath does when it is given a path that ' +
+  'resolves outside the scope root. Cite path:line.'
 
 // Cold JIT model load in LM Studio can take 60s+ (DESIGN.md §7); give it
 // real headroom but never hang forever if nothing is listening at all.

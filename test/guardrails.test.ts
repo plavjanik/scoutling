@@ -1,5 +1,5 @@
 import { describe, expect, it, afterEach } from 'vitest'
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -119,5 +119,31 @@ describe('isProbablyBinary', () => {
     const text = Buffer.from('a'.repeat(8192), 'utf8')
     const withLateNul = Buffer.concat([text, Buffer.from([0])])
     expect(isProbablyBinary(withLateNul)).toBe(false)
+  })
+})
+
+describe('resolvePath is robust to a scope root that was not canonicalized', () => {
+  it('accepts a file when the scope root reaches it through a symlinked ancestor', () => {
+    // macOS hands out temp dirs under /var, which is a symlink to /private/var.
+    // A caller that skipped resolveScopeRoot would otherwise have every single
+    // path rejected — silently, since callers treat a rejection as "skip".
+    const realRoot = mkdtempSync(join(tmpdir(), 'scoutling-uncanon-'))
+    const linkRoot = join(mkdtempSync(join(tmpdir(), 'scoutling-link-')), 'link')
+    symlinkSync(realRoot, linkRoot)
+    writeFileSync(join(realRoot, 'inside.txt'), 'hello')
+
+    expect(resolvePath(linkRoot, 'inside.txt')).toBe(join(realpathSync(realRoot), 'inside.txt'))
+
+    rmSync(realRoot, { recursive: true, force: true })
+  })
+
+  it('still rejects an escape when the scope root was not canonicalized', () => {
+    const realRoot = mkdtempSync(join(tmpdir(), 'scoutling-uncanon2-'))
+    const linkRoot = join(mkdtempSync(join(tmpdir(), 'scoutling-link2-')), 'link')
+    symlinkSync(realRoot, linkRoot)
+
+    expect(() => resolvePath(linkRoot, '../../../etc/passwd')).toThrow(/escapes the scope root/)
+
+    rmSync(realRoot, { recursive: true, force: true })
   })
 })

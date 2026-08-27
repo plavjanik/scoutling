@@ -2,8 +2,9 @@ import { describe, expect, it } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
-import { parseArgs, runCli } from '../src/cli.js'
+import { isDirectEntry, parseArgs, runCli } from '../src/cli.js'
 import { ScoutlingError } from '../src/errors.js'
 
 describe('parseArgs', () => {
@@ -167,5 +168,29 @@ describe('runCli', () => {
     expect(exitCode).toBe(2)
     const error = JSON.parse(io.stderr.join(''))
     expect(error.error).toBe('BAD_ARGS')
+  })
+})
+
+describe('direct-entry detection', () => {
+  it('recognizes the CLI being run from a path containing a space', () => {
+    const path = '/tmp/my scoutling/dist/cli.js'
+
+    expect(isDirectEntry(pathToFileURL(path).href, path)).toBe(true)
+  })
+
+  it('recognizes the CLI being run from a plain path', () => {
+    const path = '/usr/local/lib/node_modules/scoutling/dist/cli.js'
+
+    expect(isDirectEntry(pathToFileURL(path).href, path)).toBe(true)
+  })
+
+  it('does not fire when the module is imported rather than executed', () => {
+    expect(
+      isDirectEntry(pathToFileURL('/repo/dist/cli.js').href, '/repo/node_modules/.bin/vitest'),
+    ).toBe(false)
+  })
+
+  it('does not throw when there is no argv[1] at all', () => {
+    expect(isDirectEntry(pathToFileURL('/repo/dist/cli.js').href, undefined)).toBe(false)
   })
 })

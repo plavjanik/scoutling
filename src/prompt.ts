@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+
+import { resolvePath } from './guardrails.js'
 
 export interface BuildSystemPromptOptions {
   /** The scope root, already resolved (DESIGN.md §6). */
@@ -43,8 +44,11 @@ function builtInPrompt(scopeRoot: string): string {
     'asked to.',
     '',
     `Your scope root is: ${scopeRoot}`,
-    'Nothing outside this directory tree exists as far as you are concerned. Use the read_file',
-    'tool to investigate; it paginates long files via offset/limit rather than truncating them.',
+    'Nothing outside this directory tree exists as far as you are concerned.',
+    '',
+    'read_file is the only tool you have. There is no shell, no search, no directory listing and',
+    'no way to run commands — calling anything else just wastes a step. read_file paginates long',
+    'files via offset/limit rather than truncating them, so page forward instead of re-reading.',
     '',
     'Cite your evidence: every factual claim in your answer must carry a path:line (or',
     'path:line-line) citation pointing at the file and line you saw it in, relative to the scope',
@@ -63,6 +67,12 @@ function builtInPrompt(scopeRoot: string): string {
  * `maxChars` with a visible note, and skip a file that does not exist —
  * project context is a convenience, not a requirement the run should fail
  * over.
+ *
+ * Context files come from config, and a repository's committed
+ * `scoutling.config.json` is not necessarily trustworthy: a hostile checkout
+ * could list `../../../.ssh/id_rsa` and have its contents shipped to whatever
+ * provider the run is pointed at. They therefore go through the same
+ * `resolvePath` containment check as anything the model asks for.
  */
 function buildProjectContextBlock(scopeRoot: string, contextFiles: string[], maxChars: number): string {
   const sections = contextFiles
@@ -77,8 +87,10 @@ function buildProjectContextBlock(scopeRoot: string, contextFiles: string[], max
 function readContextFile(scopeRoot: string, file: string, maxChars: number): string | undefined {
   let content: string
   try {
-    content = readFileSync(join(scopeRoot, file), 'utf8')
+    content = readFileSync(resolvePath(scopeRoot, file), 'utf8')
   } catch {
+    // Missing, unreadable, or outside the scope — all are "no context from
+    // this file", never a failed run and never a read outside the scope.
     return undefined
   }
 
