@@ -56,6 +56,12 @@ describe('runScoutling', () => {
     expect(result.stepsUsed).toBe(2)
     expect(result.toolCalls).toEqual({ read_file: 1, list_dir: 0, grep: 0 })
     expect(result.exhausted).toBe(false)
+
+    // DESIGN.md §8: runScoutling's own report includes the citation check,
+    // no separate call needed. The mock's answer text cites `a.txt:1`, and
+    // a.txt exists in fixtures/scope with at least 1 line, so it verifies.
+    expect(result.citations.verifiedCount).toBe(1)
+    expect(result.citations.sources).toContainEqual({ path: 'a.txt', line: 1, verified: true })
   })
 
   it('calls list_dir, then grep, then read_file, then answers: toolCalls reflects all three', async () => {

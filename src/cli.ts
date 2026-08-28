@@ -8,6 +8,7 @@ import { loadConfig } from './config.js'
 import { ScoutlingError } from './errors.js'
 import { resolvePath, resolveScopeRoot } from './guardrails.js'
 import { runScoutling, type StepSummary } from './loop.js'
+import { formatAnswerJson, formatAnswerText, isOutputFormat, type OutputFormat } from './output.js'
 import { buildSystemPrompt } from './prompt.js'
 import { createProvider, listModels } from './provider.js'
 import type { ScoutlingConfig } from './types.js'
@@ -16,7 +17,7 @@ const USAGE = `🐦 scoutling — read-only, bounded codebase investigation with
 
 scoutling "<question>" --model <id> [--path <dir>] [--base-url <url>] [--api-key <key>]
           [--budget quick|normal|deep] [--max-steps <n>] [--max-tool-bytes <n>] [--timeout-ms <n>]
-          [--verbose]
+          [--format text|json] [--require-citations] [--verbose]
 scoutling --help
 
 Runs a bounded, read-only investigation of the directory tree at --path (default: the current
@@ -30,17 +31,21 @@ directory) and prints a cited answer to stdout.
   --max-steps <n>       Maximum tool-call steps before the run stops and reports exhausted. Overrides --budget.
   --max-tool-bytes <n>  Cumulative tool-output byte cap before further tool calls are refused. Overrides --budget.
   --timeout-ms <n>      Whole-run wall-clock timeout, including model load. Overrides --budget.
+  --format <fmt>        text (default) or json — see DESIGN.md §9 for the json object's shape.
+  --require-citations   Exit 1 if the answer verifies zero citations against the scope.
   --verbose             Log one line per step to stderr (tool name, args, bytes returned).
   --help                Print this message and exit 0.
 
 Examples:
   scoutling "Where is resolvePath defined?" --model qwen/qwen3-coder-next
   scoutling "What does this repo do?" --path ../other-repo --model qwen/qwen3-next-80b --verbose
-  scoutling "Survey the auth module" --model qwen/qwen3-next-80b --budget deep`
+  scoutling "Survey the auth module" --model qwen/qwen3-next-80b --budget deep
+  scoutling "Where is X validated?" --model qwen/qwen3-coder-next --format json --require-citations`
 
 export interface ParsedArgs {
   help: boolean
   verbose: boolean
+  requireCitations: boolean
   question?: string
   model?: string
   path?: string
@@ -51,6 +56,12 @@ export interface ParsedArgs {
   maxSteps?: number
   maxToolBytes?: number
   timeoutMs?: number
+  /**
+   * Validated here, unlike `budget`: `--format` has no config-file/env layer
+   * to merge with, so there is no reason to defer the check the way
+   * `isBudgetPreset` is deferred to `runCli`.
+   */
+  format?: OutputFormat
 }
 
 const FLAGS_WITH_VALUE = {
@@ -71,6 +82,7 @@ const NUMERIC_FLAGS = {
 const BOOLEAN_FLAGS = {
   '--verbose': 'verbose',
   '--help': 'help',
+  '--require-citations': 'requireCitations',
 } as const
 
 /**
@@ -79,7 +91,7 @@ const BOOLEAN_FLAGS = {
  * (AXI principle: an unknown flag is an error, never silently ignored).
  */
 export function parseArgs(argv: string[]): ParsedArgs {
-  const args: ParsedArgs = { help: false, verbose: false }
+  const args: ParsedArgs = { help: false, verbose: false, requireCitations: false }
   const positionals: string[] = []
 
   for (let i = 0; i < argv.length; i++) {
@@ -87,6 +99,23 @@ export function parseArgs(argv: string[]): ParsedArgs {
 
     if (token in BOOLEAN_FLAGS) {
       args[BOOLEAN_FLAGS[token as keyof typeof BOOLEAN_FLAGS]] = true
+      continue
+    }
+
+    if (token === '--format') {
+      const value = argv[i + 1]
+      if (value === undefined || value.startsWith('--')) {
+        throw new ScoutlingError('BAD_ARGS', `${token} requires a value.`, `Usage: ${token} <text|json>`)
+      }
+      if (!isOutputFormat(value)) {
+        throw new ScoutlingError(
+          'BAD_ARGS',
+          `--format must be one of text, json; got: ${value}`,
+          'Valid formats: text, json.',
+        )
+      }
+      args.format = value
+      i += 1
       continue
     }
 
@@ -121,6 +150,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     if (token.startsWith('--')) {
       const validFlags = [
         ...Object.keys(FLAGS_WITH_VALUE),
+        '--format',
         ...Object.keys(NUMERIC_FLAGS),
         ...Object.keys(BOOLEAN_FLAGS),
       ].join(', ')
@@ -301,6 +331,8 @@ export async function runCli(io: CliIO): Promise<number> {
     ...(args.timeoutMs !== undefined ? { timeoutMs: args.timeoutMs } : {}),
   })
 
+  const format: OutputFormat = args.format ?? 'text'
+
   try {
     const result = await runScoutling({
       question: args.question as string,
@@ -313,8 +345,39 @@ export async function runCli(io: CliIO): Promise<number> {
       ...(args.verbose ? { onStep: (step: StepSummary) => writeStderr(`${formatStepLog(step)}\n`) } : {}),
     })
 
-    writeStdout(`${result.answer}\n`)
-    return result.exhausted ? 1 : 0
+    writeStdout(format === 'json' ? formatAnswerJson(result, config.model) : `${formatAnswerText(result)}\n`)
+
+    // Next-step hints (DESIGN.md §7/§9): a `warning` line on stderr, never
+    // the `error` shape `emitError` writes, so a parent agent can always
+    // tell "the run finished but you should know X" apart from "the run
+    // failed with exit code Y". Both conditions are independent and can
+    // both fire on the same run — each gets its own line.
+    if (result.exhausted) {
+      writeStderr(
+        `${JSON.stringify({
+          warning: 'BUDGET_EXHAUSTED',
+          message: 'The run stopped before the model finished: a step or tool-output budget ran out.',
+          hint: 'Narrow --path or ask a more specific question.',
+        })}\n`,
+      )
+    }
+
+    const citationsRequiredButMissing = args.requireCitations && result.citations.verifiedCount === 0
+    if (citationsRequiredButMissing) {
+      writeStderr(
+        `${JSON.stringify({
+          warning: 'NO_VERIFIED_CITATIONS',
+          message: 'The answer did not cite any path:line that verifies against the scope.',
+          hint: 'Try a narrower question, or drop --require-citations to accept the answer as-is.',
+        })}\n`,
+      )
+    }
+
+    // DESIGN.md §9: exit 1 covers both "answered but budget exhausted" and
+    // "answered but --require-citations found nothing verified" — an answer
+    // that hits both still exits 1, not some combined/worse code, since
+    // there is only one non-zero "answered anyway" tier in the contract.
+    return result.exhausted || citationsRequiredButMissing ? 1 : 0
   } catch (error) {
     return emitError(classifyRunError(error, config.baseUrl))
   }

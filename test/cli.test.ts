@@ -1,11 +1,66 @@
 import { describe, expect, it } from 'vitest'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { isDirectEntry, parseArgs, runCli } from '../src/cli.js'
 import { ScoutlingError } from '../src/errors.js'
+
+/** Read-only fixture scope shared by every citation-related test below — no mkdtemp needed. */
+const fixtureScopeRoot = resolve(import.meta.dirname, 'fixtures/scope')
+
+/** A one-shot OpenAI-compatible chat completion with plain text content and finish_reason 'stop'. */
+function textCompletionResponse(content: string): Response {
+  return new Response(
+    JSON.stringify({
+      id: 'chat-1',
+      object: 'chat.completion',
+      created: 0,
+      model: 'a-model',
+      choices: [
+        {
+          index: 0,
+          message: { role: 'assistant', content },
+          finish_reason: 'stop',
+        },
+      ],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    }),
+    { status: 200, headers: { 'content-type': 'application/json' } },
+  )
+}
+
+/** A chat completion that always calls list_dir — a model that never stops on its own, to force exhaustion. */
+function toolCallCompletionResponse(): Response {
+  return new Response(
+    JSON.stringify({
+      id: 'chat-1',
+      object: 'chat.completion',
+      created: 0,
+      model: 'a-model',
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: 'assistant',
+            content: null,
+            tool_calls: [
+              {
+                id: 'call-1',
+                type: 'function',
+                function: { name: 'list_dir', arguments: JSON.stringify({ path: '.' }) },
+              },
+            ],
+          },
+          finish_reason: 'tool_calls',
+        },
+      ],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    }),
+    { status: 200, headers: { 'content-type': 'application/json' } },
+  )
+}
 
 describe('parseArgs', () => {
   it('parses the question and known flags', () => {
@@ -25,12 +80,40 @@ describe('parseArgs', () => {
     expect(args).toEqual({
       help: false,
       verbose: true,
+      requireCitations: false,
       question: 'What does resolvePath do?',
       model: 'qwen/qwen3-coder-next',
       path: '/tmp/repo',
       baseUrl: 'http://localhost:1234/v1',
       apiKey: 'sk-test',
     })
+  })
+
+  it('parses --format and --require-citations', () => {
+    const args = parseArgs(['a question', '--format', 'json', '--require-citations'])
+    expect(args.format).toBe('json')
+    expect(args.requireCitations).toBe(true)
+  })
+
+  it('defaults --format to undefined (runCli applies the "text" default) and --require-citations to false', () => {
+    const args = parseArgs(['a question'])
+    expect(args.format).toBeUndefined()
+    expect(args.requireCitations).toBe(false)
+  })
+
+  it('rejects an unknown --format value, naming both valid values', () => {
+    expect(() => parseArgs(['a question', '--format', 'nonsense'])).toThrow(ScoutlingError)
+    try {
+      parseArgs(['a question', '--format', 'nonsense'])
+    } catch (error) {
+      expect((error as ScoutlingError).code).toBe('BAD_ARGS')
+      expect((error as ScoutlingError).message).toContain('text')
+      expect((error as ScoutlingError).message).toContain('json')
+    }
+  })
+
+  it('rejects --format with a missing value', () => {
+    expect(() => parseArgs(['a question', '--format'])).toThrow(ScoutlingError)
   })
 
   it('parses --max-steps as a number', () => {
@@ -108,9 +191,9 @@ describe('parseArgs', () => {
   })
 
   it('rejects an unknown flag', () => {
-    expect(() => parseArgs(['q', '--format', 'json'])).toThrow(ScoutlingError)
+    expect(() => parseArgs(['q', '--bogus-flag', 'json'])).toThrow(ScoutlingError)
     try {
-      parseArgs(['q', '--format', 'json'])
+      parseArgs(['q', '--bogus-flag', 'json'])
     } catch (error) {
       expect((error as ScoutlingError).code).toBe('BAD_ARGS')
     }
@@ -224,7 +307,7 @@ describe('runCli', () => {
   it('rejects an unknown flag with BAD_ARGS (2) before touching config or the provider', async () => {
     const io = captureIO()
     const exitCode = await runCli({
-      argv: ['a question', '--format', 'json'],
+      argv: ['a question', '--bogus-flag', 'json'],
       writeStdout: io.writeStdout,
       writeStderr: io.writeStderr,
     })
@@ -347,6 +430,158 @@ describe('runCli', () => {
     } finally {
       rmSync(scopeRoot, { recursive: true, force: true })
     }
+  })
+
+  it('--format json emits parseable JSON on stdout with every documented key', async () => {
+    const io = captureIO()
+    const fetchImpl = (async () =>
+      textCompletionResponse('The value is set (a.txt:1) at startup.')) as unknown as typeof fetch
+
+    const exitCode = await runCli({
+      argv: ['a question', '--model', 'a-model', '--path', fixtureScopeRoot, '--format', 'json'],
+      fetch: fetchImpl,
+      writeStdout: io.writeStdout,
+      writeStderr: io.writeStderr,
+    })
+
+    expect(exitCode).toBe(0)
+    const parsed = JSON.parse(io.stdout.join(''))
+    expect(Object.keys(parsed).sort()).toEqual(
+      [
+        'answer',
+        'exhausted',
+        'model',
+        'sources',
+        'stepsUsed',
+        'timedOut',
+        'toolCalls',
+        'toolOutputBytes',
+        'usage',
+        'wallMs',
+      ].sort(),
+    )
+    expect(parsed.model).toBe('a-model')
+    expect(parsed.timedOut).toBe(false)
+    expect(Array.isArray(parsed.sources)).toBe(true)
+  })
+
+  it('--format text puts the Sources: line on stdout after the answer; --format json does not print it separately', async () => {
+    const answerText = 'The value is set (a.txt:1) at startup.'
+    const fetchImpl = (async () => textCompletionResponse(answerText)) as unknown as typeof fetch
+
+    const textIo = captureIO()
+    const textExit = await runCli({
+      argv: ['a question', '--model', 'a-model', '--path', fixtureScopeRoot],
+      fetch: fetchImpl,
+      writeStdout: textIo.writeStdout,
+      writeStderr: textIo.writeStderr,
+    })
+    expect(textExit).toBe(0)
+    const textOut = textIo.stdout.join('')
+    expect(textOut).toContain(answerText)
+    expect(textOut).toContain('Sources:')
+    expect(textOut.indexOf('Sources:')).toBeGreaterThan(textOut.indexOf(answerText))
+
+    const jsonIo = captureIO()
+    const jsonExit = await runCli({
+      argv: ['a question', '--model', 'a-model', '--path', fixtureScopeRoot, '--format', 'json'],
+      fetch: fetchImpl,
+      writeStdout: jsonIo.writeStdout,
+      writeStderr: jsonIo.writeStderr,
+    })
+    expect(jsonExit).toBe(0)
+    expect(jsonIo.stdout.join('')).not.toContain('Sources:')
+  })
+
+  it('--format nonsense exits BAD_ARGS (2)', async () => {
+    const io = captureIO()
+    const exitCode = await runCli({
+      argv: ['a question', '--model', 'a-model', '--format', 'nonsense'],
+      writeStdout: io.writeStdout,
+      writeStderr: io.writeStderr,
+    })
+
+    expect(exitCode).toBe(2)
+    const error = JSON.parse(io.stderr.join(''))
+    expect(error.error).toBe('BAD_ARGS')
+    expect(error.message).toContain('text')
+    expect(error.message).toContain('json')
+  })
+
+  it('--require-citations with an answer that cites nothing exits 1, still prints the answer, and warns NO_VERIFIED_CITATIONS', async () => {
+    const io = captureIO()
+    const fetchImpl = (async () =>
+      textCompletionResponse('There is nothing relevant in this scope.')) as unknown as typeof fetch
+
+    const exitCode = await runCli({
+      argv: ['a question', '--model', 'a-model', '--path', fixtureScopeRoot, '--require-citations'],
+      fetch: fetchImpl,
+      writeStdout: io.writeStdout,
+      writeStderr: io.writeStderr,
+    })
+
+    expect(exitCode).toBe(1)
+    expect(io.stdout.join('')).toContain('There is nothing relevant')
+    const warnings = io.stderr.map((line) => JSON.parse(line))
+    expect(warnings).toContainEqual(expect.objectContaining({ warning: 'NO_VERIFIED_CITATIONS' }))
+  })
+
+  it('--require-citations with an answer that verifies against the scope exits 0 with no warning', async () => {
+    const io = captureIO()
+    const fetchImpl = (async () =>
+      textCompletionResponse('The value is set (a.txt:1) at startup.')) as unknown as typeof fetch
+
+    const exitCode = await runCli({
+      argv: ['a question', '--model', 'a-model', '--path', fixtureScopeRoot, '--require-citations'],
+      fetch: fetchImpl,
+      writeStdout: io.writeStdout,
+      writeStderr: io.writeStderr,
+    })
+
+    expect(exitCode).toBe(0)
+    expect(io.stderr).toEqual([])
+  })
+
+  it('an exhausted run emits a BUDGET_EXHAUSTED warning on stderr and exits 1', async () => {
+    const io = captureIO()
+    const fetchImpl = (async () => toolCallCompletionResponse()) as unknown as typeof fetch
+
+    const exitCode = await runCli({
+      argv: ['a question', '--model', 'a-model', '--path', fixtureScopeRoot, '--max-steps', '1'],
+      fetch: fetchImpl,
+      writeStdout: io.writeStdout,
+      writeStderr: io.writeStderr,
+    })
+
+    expect(exitCode).toBe(1)
+    const warnings = io.stderr.map((line) => JSON.parse(line))
+    expect(warnings).toContainEqual(expect.objectContaining({ warning: 'BUDGET_EXHAUSTED' }))
+  })
+
+  it('exhausted and zero verified citations under --require-citations still exits 1, with both warnings', async () => {
+    const io = captureIO()
+    const fetchImpl = (async () => toolCallCompletionResponse()) as unknown as typeof fetch
+
+    const exitCode = await runCli({
+      argv: [
+        'a question',
+        '--model',
+        'a-model',
+        '--path',
+        fixtureScopeRoot,
+        '--max-steps',
+        '1',
+        '--require-citations',
+      ],
+      fetch: fetchImpl,
+      writeStdout: io.writeStdout,
+      writeStderr: io.writeStderr,
+    })
+
+    expect(exitCode).toBe(1)
+    const warnings = io.stderr.map((line) => JSON.parse(line))
+    expect(warnings).toContainEqual(expect.objectContaining({ warning: 'BUDGET_EXHAUSTED' }))
+    expect(warnings).toContainEqual(expect.objectContaining({ warning: 'NO_VERIFIED_CITATIONS' }))
   })
 })
 

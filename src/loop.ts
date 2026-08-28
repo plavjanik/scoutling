@@ -1,6 +1,7 @@
 import { generateText, isStepCount, type LanguageModel } from 'ai'
 
 import { type Budget, ToolOutputBudget, resolveBudget, withToolOutputBudget } from './budget.js'
+import { type CitationReport, verifyCitations } from './citations.js'
 import { ScoutlingError } from './errors.js'
 import { createTools } from './tools/index.js'
 
@@ -48,6 +49,13 @@ export interface RunResult {
   wallMs: number
   /** Cumulative bytes charged by `ToolOutputBudget` — Phase 6 tunes the budget presets from these numbers. */
   toolOutputBytes: number
+  /**
+   * DESIGN.md §8's cited-answer contract, checked here rather than by every
+   * caller: it is a filesystem check against `options.scopeRoot` with no
+   * model call, so it belongs to the run's own report, computed exactly
+   * once, right after the loop that produced the text it checks.
+   */
+  citations: CitationReport
 }
 
 /** Tallies each tool call by name, generically rather than one hand-written filter per tool. */
@@ -177,6 +185,8 @@ export async function runScoutling(options: RunOptions): Promise<RunResult> {
   // plain `FinishReason` string — there is no `.unified` here.
   const exhausted = result.finishReason === 'tool-calls' || toolOutputBudget.exhausted
 
+  const citations = verifyCitations(options.scopeRoot, result.text)
+
   return {
     answer: result.text,
     stepsUsed: result.steps.length,
@@ -188,5 +198,6 @@ export async function runScoutling(options: RunOptions): Promise<RunResult> {
     },
     wallMs,
     toolOutputBytes: toolOutputBudget.spent,
+    citations,
   }
 }
