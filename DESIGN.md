@@ -406,6 +406,14 @@ recommend as a starting point"* — not *"is local delegation as good as Sonnet"
    `local-ai/docs/scoutling-eval.json` with the 9 seeds.
 6. **Run the reference eval** across the 4 models, grade, pick the recommended model, tune
    preset numbers from observed `stepsUsed`/bytes, record results in `docs/eval.md` + README.
+   **Do the preset re-sizing first, before grading anything.** Phase 4 measured that a default
+   400-line `read_file` page of a real source file is **17.3 KB**, which is larger than the
+   entire `quick` preset's 16 KB tool-output budget — `quick` cannot afford a single default
+   read, so any `quick` result graded before that is measuring the preset, not the model.
+   `normal` is marginal for the same reason: the smoke question needs 6 steps and 33 KB against
+   caps of 8 and 40 KB, and one observed run spent all 8 steps without writing an answer
+   (`docs/dogfood-log.md`). Re-size the three presets against `read_file`'s real page cost, then
+   run the eval.
 7. **Integrations + adoption** — `docs/integrations/*.md`; in `local-ai`: `scoutling.config.json`,
    `.claude/skills/scoutling/SKILL.md`, one line in `CLAUDE.md`.
 8. **Publish** — README with the eval numbers, `npm publish --provenance` from CI on `v0.1.0`
@@ -431,6 +439,20 @@ delegation rule; review, eval grading and the README claims stay in the main loo
   residual risk is Windows path handling in `guardrails.ts` and the CLI entry point.
 
 ## 15. Future ideas (post-v0.1, roughly by value ÷ effort)
+
+> **Deferred from Phase 4** (found by running the tool; triaged 2026-08-28 as "later"):
+>
+> - **A timeout throws away every step the run completed.** `generateText` rejects on abort, so a
+>   run that dies at the wall-clock cap loses all of its tool calls and returns nothing — the
+>   worst possible outcome for the slowest possible run. It is also why `timedOut` in the
+>   `--format json` object (§9) is a permanently-`false` dead field. Accumulating steps through
+>   `onStepFinish` and synthesising "here is what I found before I ran out of time" would make
+>   the field real and turn a total loss into a partial answer. Wants a decision about whether
+>   that exits 4 (an error, as today) or 1 (answered-but-degraded, like budget exhaustion).
+> - **The citation extractor still admits a `word:digits` token** — "Figure 2:5", "Step 3:1".
+>   Requiring a line number (§8) removed every false positive observed so far, but not this
+>   class. Low frequency and low harm (it lands as one unverifiable source), so it is worth
+>   revisiting against Phase 5's question set rather than guessing at a fix now.
 
 1. **Read-only git tools** — `git_log`, `git_blame`, `git_diff` (execFile, `--` guarded). "When
    did X change and why" is the most common question the three fs tools can't answer. v0.2.
