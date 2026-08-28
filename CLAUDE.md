@@ -245,6 +245,15 @@ questions become Phase 5 question-set seeds. scoutling never writes this log; th
 Plus `.claude/skills/scoutling/` — the DESIGN.md §11 Claude Code integration, checked in, not
 from the lockfile. Keep it truthful about which flags actually exist.
 
+**They are excluded from scoutling's own investigation scope** (`scoutling.config.json`'s
+`excludeGlobs`), and that is not a judgement about their value — they are for *writing* code and
+Claude Code loads them through the Skill tool, which `excludeGlobs` does not touch. They are just
+noise when scoutling is asked about *this* codebase: 332 KB of third-party prose competing for
+`grep`'s 100-match cap, which since hidden directories became searchable was returning vendored
+docs among the top hits for ordinary queries. `.claude/skills/scoutling/` is deliberately **not**
+excluded — it is ours, checked in, and part of the product surface, so "does the skill still
+describe flags that exist?" stays an answerable question.
+
 ## Local dev
 
 - Reference machine runs LM Studio on `http://localhost:1234/v1`; verified model ids for smoke
