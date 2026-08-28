@@ -32,6 +32,15 @@ const QUESTION =
 // simply not listening.
 const SMOKE_TIMEOUT_MS = 300_000
 
+// Passed to the run explicitly, and deliberately equal to the smoke's own
+// backstop above. Since Phase 4 the CLI enforces its own wall-clock budget,
+// and the `normal` preset's 180s is *less* than the 3.5 minutes this exact
+// question has been observed to take — so without this the run would abort
+// itself with TIMEOUT (exit 4) before the smoke's outer race ever fired, and
+// a perfectly healthy endpoint would look broken. The outer race stays as a
+// backstop for a hang that happens outside the run's own accounting.
+const RUN_TIMEOUT_MS = SMOKE_TIMEOUT_MS
+
 async function main(): Promise<number> {
   console.error(`scoutling smoke: ${BASE_URL} model=${MODEL}`)
   console.error(`question: ${QUESTION}`)
@@ -47,8 +56,35 @@ async function main(): Promise<number> {
     }, SMOKE_TIMEOUT_MS).unref()
   })
 
+  // `--require-citations` is what makes this smoke check the *product* rather
+  // than just "a run completed". The question has always ended in "Cite
+  // path:line", but until Phase 4 nothing verified that it did — an answer
+  // citing nothing, or citing files that do not exist, exited 0 exactly like
+  // a good one. Now zero verified citations is exit 1 and the smoke fails.
   const run = runCli({
-    argv: [QUESTION, '--model', MODEL, '--base-url', BASE_URL, '--path', '.', '--verbose'],
+    argv: [
+      QUESTION,
+      '--model',
+      MODEL,
+      '--base-url',
+      BASE_URL,
+      '--path',
+      '.',
+      // `deep`, not the `normal` default, on purpose. This question has been
+      // measured at 6 steps and 33 KB of tool output — inside `normal`'s 8
+      // and 40 KB, but close enough that a run which explores one extra file
+      // exhausts and answers nothing. That happened on the first Phase 4
+      // smoke. Whether `normal` is big enough is a real question, but it is
+      // a *tuning* question that belongs to the eval (Phase 6) and the
+      // dogfood log; letting it decide whether the smoke passes would mean a
+      // healthy build failing at random.
+      '--budget',
+      'deep',
+      '--timeout-ms',
+      String(RUN_TIMEOUT_MS),
+      '--require-citations',
+      '--verbose',
+    ],
   }).then((exitCode) => {
     if (exitCode === 3) {
       console.error(
