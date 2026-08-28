@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, readdirSync, statSync, type Dirent } from 'node:fs'
-import { join, relative, sep } from 'node:path'
+import { dirname, join, relative, sep } from 'node:path'
 import ignoreFactory from 'ignore'
 
 /** The type returned by the `ignore` factory function; there is no separately-exported type name. */
@@ -33,8 +33,17 @@ export interface WalkOptions {
   limit: number
 }
 
-/** `.git` is excluded unconditionally — it is never a legitimate answer to a codebase question. */
-const ALWAYS_EXCLUDED_NAME = '.git'
+/**
+ * Globs excluded no matter what the config says. `.git/` is enormous, is
+ * never useful as text, and since `grep` now searches hidden directories
+ * (DESIGN.md §6, §15 — the fix for the grep/list_dir hidden-file divergence)
+ * it would otherwise be reachable whenever a config's `excludeGlobs` omits
+ * it — config layers *replace* this key rather than merging it (config.ts),
+ * so a user narrowing `excludeGlobs` must not silently re-expose the object
+ * store. Applied by every caller of `isExcludedByGlobs` in addition to
+ * whatever `excludeGlobs` it was given, never instead of it.
+ */
+export const ALWAYS_EXCLUDED_GLOBS: readonly string[] = ['.git/**']
 
 const GITIGNORE_FILENAME = '.gitignore'
 
@@ -163,6 +172,24 @@ function excludeGlobMatches(glob: string, relativeToScopeRoot: string, isDir: bo
   return false
 }
 
+/**
+ * The one glob-exclusion check every tool shares: `excludeGlobs` (config,
+ * never the model) unioned with `ALWAYS_EXCLUDED_GLOBS` (structural, always
+ * on). `walkScope` and `isPathVisible` both call this rather than each
+ * keeping its own copy of "which globs apply" — see the module doc comment
+ * on `isPathVisible` for why a literal shared call isn't used for the
+ * traversal case instead.
+ */
+function isExcludedByGlobs(relativeToScopeRoot: string, isDir: boolean, excludeGlobs: readonly string[]): boolean {
+  for (const glob of ALWAYS_EXCLUDED_GLOBS) {
+    if (excludeGlobMatches(glob, relativeToScopeRoot, isDir)) return true
+  }
+  for (const glob of excludeGlobs) {
+    if (excludeGlobMatches(glob, relativeToScopeRoot, isDir)) return true
+  }
+  return false
+}
+
 /** One level of the `.gitignore` stack: a directory and the matcher built from its `.gitignore`, if any. */
 interface GitignoreFrame {
   dirPath: string
@@ -226,6 +253,115 @@ function matchesGitignoreStack(stack: GitignoreFrame[], absPath: string, isDir: 
   })
 }
 
+/**
+ * Which rule made a path invisible — `undefined` means it's visible. Lets a
+ * refusal (`read_file`'s `PATH_EXCLUDED`, DESIGN.md §15) name the rule
+ * instead of leaving a small model to guess why. Checked in the same order
+ * `isExcludedByGlobs` would evaluate them, just kept separate here rather
+ * than folded into one boolean-returning loop so each branch can report
+ * *which* glob or rule fired.
+ */
+export type PathExclusionReason =
+  | { rule: 'git' }
+  | { rule: 'excludeGlobs'; glob: string }
+  | { rule: 'gitignore' }
+
+/**
+ * Explains (or clears) the visibility of `absPath` under the same rule
+ * `walkScope` applies: not `.git/**` (always), not `excludeGlobs`-matched,
+ * not gitignored by any `.gitignore` from `scopeRoot` down to it. `absPath`
+ * must already be inside `scopeRoot` (callers go through `resolvePath`
+ * first, per `guardrails.ts` — this function does not itself re-check
+ * containment).
+ *
+ * This is a single-path check used by `read_file` (DESIGN.md §6, §15): a
+ * model names one file directly rather than discovering it through a
+ * traversal, so there is no `walkScope` queue item to reuse. It reuses
+ * `ALWAYS_EXCLUDED_GLOBS`, `excludeGlobMatches` and `matchesGitignoreStack` —
+ * the same building blocks `walkScope`'s loop (via `isExcludedByGlobs`)
+ * calls — rather than re-deriving the rule, which is the whole point of the
+ * fix (having two independent copies of "what's visible" is exactly bug
+ * A/B). What it does NOT share is `walkScope`'s incremental, breadth-first
+ * stack-building: `walkScope` extends one `.gitignore` stack once per
+ * directory as it descends, amortized across every entry in that directory,
+ * whereas a single-path check has no walk to amortize over and rebuilds the
+ * stack from `scopeRoot` down on every call. Calling into `walkScope` itself
+ * to answer one path would mean walking (and reading every `.gitignore` in)
+ * the whole path prefix on every `read_file` call — for a one-file question,
+ * correct but needlessly expensive — so the two functions share logic, not a
+ * call site.
+ *
+ * `isDir` is inferred with a best-effort `statSync` rather than required
+ * from the caller: `read_file` calls this before its own `existsSync` check
+ * (a path's visibility is a property of the path, not of whether it
+ * currently exists), so the file may not exist yet, or may not be readable.
+ * This only matters for a `.gitignore` pattern that targets `absPath` itself
+ * with a dir-only trailing slash (e.g. `foo/` vs `foo`) — a pattern that
+ * ignores a *directory* also ignores everything under it regardless of
+ * trailing slash (verified:
+ * `ignore().add('ignored-dir/\n').ignores('ignored-dir/f.md')` is `true`
+ * with no `isDir` involved), so guessing wrong here only risks the one edge
+ * case of checking the excluded directory's own path, which `read_file`
+ * immediately rejects as `NOT_A_FILE` afterwards anyway.
+ */
+export function explainPathExclusion(
+  scopeRoot: string,
+  absPath: string,
+  options?: { excludeGlobs?: string[] },
+): PathExclusionReason | undefined {
+  const excludeGlobs = options?.excludeGlobs ?? []
+  const relFromScopeRoot = toPosix(relative(scopeRoot, absPath))
+
+  // The scope root itself is never excludable — there is no glob or
+  // .gitignore entry that could sensibly match "." — so short-circuit
+  // rather than let `dirname(scopeRoot)` walk the stack above the root.
+  if (relFromScopeRoot === '') return undefined
+
+  let isDir = false
+  try {
+    isDir = statSync(absPath).isDirectory()
+  } catch {
+    // Doesn't exist (yet) or isn't statable: see the doc comment above.
+  }
+
+  for (const glob of ALWAYS_EXCLUDED_GLOBS) {
+    if (excludeGlobMatches(glob, relFromScopeRoot, isDir)) return { rule: 'git' }
+  }
+  for (const glob of excludeGlobs) {
+    if (excludeGlobMatches(glob, relFromScopeRoot, isDir)) return { rule: 'excludeGlobs', glob }
+  }
+
+  const stack = buildInitialGitignoreStack(scopeRoot, dirname(absPath))
+  if (matchesGitignoreStack(stack, absPath, isDir)) return { rule: 'gitignore' }
+
+  return undefined
+}
+
+/** True when `absPath` is visible — see `explainPathExclusion` for the rule and why a path may not be. */
+export function isPathVisible(scopeRoot: string, absPath: string, options?: { excludeGlobs?: string[] }): boolean {
+  return explainPathExclusion(scopeRoot, absPath, options) === undefined
+}
+
+/**
+ * Names WHICH rule made a path invisible, for a `PATH_EXCLUDED` refusal
+ * message (DESIGN.md §15) — so a small model stops retrying the same path
+ * instead of guessing why it failed. Shared by `read_file`, `grep` and
+ * `list_dir` (all three refuse an explicitly-named excluded path the same
+ * way, per DESIGN.md §6/§15's 2026-08-28 follow-up) rather than each tool
+ * keeping its own copy of this switch, which is exactly the kind of
+ * independent-copies-of-"what's visible" drift the original fix closed.
+ */
+export function describeExclusionReason(reason: PathExclusionReason): string {
+  switch (reason.rule) {
+    case 'git':
+      return 'it is under .git/, which is never a readable path regardless of config'
+    case 'excludeGlobs':
+      return `it matches the excludeGlobs entry "${reason.glob}"`
+    case 'gitignore':
+      return 'it is gitignored'
+  }
+}
+
 /** Sorted string comparison, deliberately plain `<` (not `localeCompare`) so ordering is portable across locales/platforms. */
 function compareNames(a: Dirent, b: Dirent): number {
   if (a.name < b.name) return -1
@@ -282,8 +418,7 @@ export function walkScope(options: WalkOptions): WalkResult {
       const isSymlink = dirent.isSymbolicLink()
       const isDirCandidate = !isSymlink && dirent.isDirectory()
 
-      if (dirent.name === ALWAYS_EXCLUDED_NAME) continue
-      if (excludeGlobs.some((g) => excludeGlobMatches(g, relFromScopeRoot, isDirCandidate))) continue
+      if (isExcludedByGlobs(relFromScopeRoot, isDirCandidate, excludeGlobs)) continue
       if (matchesGitignoreStack(item.stack, absPath, isDirCandidate)) continue
 
       let entry: WalkEntry

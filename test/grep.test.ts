@@ -117,6 +117,62 @@ describe('grep (ripgrep backend)', () => {
     expect(result.matches.map((m) => m.file)).toEqual(['plain.txt'])
   })
 
+  it(
+    'refuses PATH_EXCLUDED — not a leaked match — when path names an excluded file directly, ' +
+      'on both the ripgrep and fallback engines',
+    async () => {
+      // Pins the bug this file's task fixed (DESIGN.md §6/§15, 2026-08-28
+      // follow-up): grep only ever filtered its OWN traversal (via
+      // `walkScope`/ripgrep's `--glob '!...'`), never the model-supplied
+      // `path` argument itself. Naming an excluded path directly bypassed
+      // exclusion entirely — a real content leak, not just an
+      // inconsistency, because ripgrep searches an explicitly-named file
+      // regardless of any `--glob` flag. Before the fix this returned
+      // `{matches: [{file: 'ignored.txt', ...}], engine: 'ripgrep'}`.
+      //
+      // Asserts the refusal SHAPE, not just "no error". A shallow check like
+      // `result.matches?.length === 0` would pass by accident on a buggy
+      // return of `{matches: [], error: 'PATH_EXCLUDED'}` that still somehow
+      // carried an (empty) `matches` array, or would miss a regression that
+      // returned real matches alongside a spurious `error` field. `error`
+      // must be exactly `PATH_EXCLUDED` and `matches` must be absent
+      // entirely, matching the `GrepRefusal` shape as actually declared.
+      const dir = tempDir('scoutling-grep-explicit-path-leak-')
+      mkdirSync(join(dir, '.git'), { recursive: true })
+      writeFileSync(join(dir, '.gitignore'), 'ignored.txt\n')
+      writeFileSync(join(dir, 'ignored.txt'), 'MATCHME but gitignored\n')
+      writeFileSync(join(dir, '.git', 'HEAD'), 'MATCHME under .git\n')
+      writeFileSync(join(dir, 'plain.txt'), 'MATCHME and visible\n')
+
+      const scope = resolveScopeRoot(dir)
+      const ripgrepTool = createGrepTool(scope)
+      const fallbackTool = createGrepTool(scope, { rgPath: NONEXISTENT_RG_PATH })
+
+      for (const tool of [ripgrepTool, fallbackTool]) {
+        const gitignoredResult = (await run(tool, { pattern: 'MATCHME', path: 'ignored.txt' })) as {
+          error?: string
+          matches?: unknown[]
+        }
+        expect(gitignoredResult.error).toBe('PATH_EXCLUDED')
+        expect(gitignoredResult.matches).toBeUndefined()
+
+        const gitResult = (await run(tool, { pattern: 'MATCHME', path: '.git/HEAD' })) as {
+          error?: string
+          matches?: unknown[]
+        }
+        expect(gitResult.error).toBe('PATH_EXCLUDED')
+        expect(gitResult.matches).toBeUndefined()
+      }
+
+      // Control: the same pattern against the visible file, and against "."
+      // (which must still search everything visible, unrefused), still
+      // finds the real match — proves the guard didn't just start refusing
+      // everything.
+      const controlResult = (await run(ripgrepTool, { pattern: 'MATCHME' })) as OkShape
+      expect(controlResult.matches.map((m) => m.file)).toEqual(['plain.txt'])
+    },
+  )
+
   it('is a definitive empty state when nothing matches', async () => {
     const tool = createGrepTool(scopeRoot)
     const result = (await run(tool, { pattern: 'zzz-does-not-exist-zzz' })) as OkShape
@@ -406,5 +462,78 @@ describe('grep defaults', () => {
   it('exports the documented default and ceiling for maxMatches', () => {
     expect(DEFAULT_MAX_MATCHES).toBe(100)
     expect(MAX_MAX_MATCHES).toBe(500)
+  })
+})
+
+describe('grep sees hidden files, same as list_dir and read_file (DESIGN.md §15, bug A)', () => {
+  it('ripgrep engine finds a match inside a dot-directory', async () => {
+    const dir = tempDir('scoutling-grep-hidden-')
+    mkdirSync(join(dir, '.github', 'workflows'), { recursive: true })
+    writeFileSync(join(dir, '.github', 'workflows', 'ci.yml'), 'NEEDLE inside hidden dir\n')
+    writeFileSync(join(dir, 'plain.txt'), 'NEEDLE in a plain file\n')
+
+    const tool = createGrepTool(resolveScopeRoot(dir))
+    const result = (await run(tool, { pattern: 'NEEDLE' })) as OkShape
+
+    expect(result.engine).toBe('ripgrep')
+    expect(result.matches.map((m) => m.file).sort()).toEqual(['.github/workflows/ci.yml', 'plain.txt'])
+  })
+
+  it('ripgrep engine still excludes .git/ even though --hidden widens what it searches', async () => {
+    const dir = tempDir('scoutling-grep-hidden-git-')
+    mkdirSync(join(dir, '.git'), { recursive: true })
+    writeFileSync(join(dir, '.git', 'HEAD'), 'NEEDLE\n')
+    writeFileSync(join(dir, 'plain.txt'), 'NEEDLE\n')
+
+    const tool = createGrepTool(resolveScopeRoot(dir))
+    const result = (await run(tool, { pattern: 'NEEDLE' })) as OkShape
+
+    expect(result.engine).toBe('ripgrep')
+    expect(result.matches.map((m) => m.file)).toEqual(['plain.txt'])
+  })
+
+  it('.git/ stays excluded even when a caller-supplied excludeGlobs omits it (ALWAYS_EXCLUDED_GLOBS backstop)', async () => {
+    const dir = tempDir('scoutling-grep-hidden-git-backstop-')
+    mkdirSync(join(dir, '.git'), { recursive: true })
+    writeFileSync(join(dir, '.git', 'HEAD'), 'NEEDLE\n')
+    writeFileSync(join(dir, 'plain.txt'), 'NEEDLE\n')
+
+    // A config layer that narrows excludeGlobs to something with no mention
+    // of .git/** at all — exactly the case ALWAYS_EXCLUDED_GLOBS exists to
+    // guard, since config layers replace this key rather than merging it.
+    const tool = createGrepTool(resolveScopeRoot(dir), { excludeGlobs: ['some-other-dir/**'] })
+    const result = (await run(tool, { pattern: 'NEEDLE' })) as OkShape
+
+    expect(result.engine).toBe('ripgrep')
+    expect(result.matches.map((m) => m.file)).toEqual(['plain.txt'])
+  })
+
+  it('ripgrep and the JS fallback agree on the same set of files for a hidden-file fixture', async () => {
+    const dir = tempDir('scoutling-grep-hidden-parity-')
+    mkdirSync(join(dir, '.dotdir'), { recursive: true })
+    mkdirSync(join(dir, '.git'), { recursive: true })
+    writeFileSync(join(dir, '.dotfile.md'), 'NEEDLE dotfile\n')
+    writeFileSync(join(dir, '.dotdir', 'inside.md'), 'NEEDLE dotdir\n')
+    writeFileSync(join(dir, '.git', 'HEAD'), 'NEEDLE gitobj\n')
+    writeFileSync(join(dir, 'plain.md'), 'NEEDLE plain\n')
+
+    const scope = resolveScopeRoot(dir)
+    const ripgrepTool = createGrepTool(scope)
+    const fallbackTool = createGrepTool(scope, { rgPath: NONEXISTENT_RG_PATH })
+
+    const ripgrepResult = (await run(ripgrepTool, { pattern: 'NEEDLE' })) as OkShape
+    const fallbackResult = (await run(fallbackTool, { pattern: 'NEEDLE' })) as OkShape
+
+    // Assert which engine actually ran on each side — the whole point of
+    // this test is proving two DIFFERENT code paths agree, not just that
+    // one of them found the right files ("a test must prove the path it
+    // claims", CLAUDE.md).
+    expect(ripgrepResult.engine).toBe('ripgrep')
+    expect(fallbackResult.engine).toBe('fallback')
+
+    const ripgrepFiles = ripgrepResult.matches.map((m) => m.file).sort()
+    const fallbackFiles = fallbackResult.matches.map((m) => m.file).sort()
+    expect(ripgrepFiles).toEqual(['.dotdir/inside.md', '.dotfile.md', 'plain.md'])
+    expect(fallbackFiles).toEqual(ripgrepFiles)
   })
 })

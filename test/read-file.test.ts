@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { resolve } from 'node:path'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -142,5 +142,82 @@ describe('read_file', () => {
 
     expect(result.error).toBeDefined()
     expect(result.message).toMatch(/not found|does not exist/i)
+  })
+})
+
+/**
+ * DESIGN.md §15 "bug B": before this fix, read_file was the one of the
+ * three tools that ignored `excludeGlobs`, `.gitignore` and `.git/`
+ * entirely — it would happily read `.git/HEAD` or a gitignored secret file
+ * that `list_dir` would never surface. `PATH_EXCLUDED` closes that gap and
+ * is checked before `PATH_NOT_FOUND` (visibility is a property of the path,
+ * not of whether it currently exists).
+ */
+describe('read_file honours excludeGlobs, .gitignore and .git/ (DESIGN.md §15, bug B)', () => {
+  it('refuses a path under .git/ even with no excludeGlobs passed', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'scoutling-readfile-git-'))
+    try {
+      mkdirSync(join(dir, '.git'), { recursive: true })
+      writeFileSync(join(dir, '.git', 'HEAD'), 'ref: refs/heads/main\n')
+
+      const tool = createReadFileTool(resolveScopeRoot(dir))
+      const result = (await run(tool, { path: '.git/HEAD' })) as { error: string; message: string; hint?: string }
+
+      expect(result.error).toBe('PATH_EXCLUDED')
+      expect(result.message).toMatch(/\.git\//)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses a path matched by excludeGlobs, naming the matching glob', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'scoutling-readfile-excludeglobs-'))
+    try {
+      mkdirSync(join(dir, 'excluded'), { recursive: true })
+      writeFileSync(join(dir, 'excluded', 'f.md'), 'x')
+
+      const tool = createReadFileTool(resolveScopeRoot(dir), { excludeGlobs: ['excluded/**'] })
+      const result = (await run(tool, { path: 'excluded/f.md' })) as {
+        error: string
+        message: string
+        hint?: string
+      }
+
+      expect(result.error).toBe('PATH_EXCLUDED')
+      expect(result.message).toContain('excluded/**')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses a gitignored path', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'scoutling-readfile-gitignore-'))
+    try {
+      writeFileSync(join(dir, '.gitignore'), 'secret.env\n')
+      writeFileSync(join(dir, 'secret.env'), 'sh')
+
+      const tool = createReadFileTool(resolveScopeRoot(dir))
+      const result = (await run(tool, { path: 'secret.env' })) as { error: string; message: string }
+
+      expect(result.error).toBe('PATH_EXCLUDED')
+      expect(result.message).toMatch(/gitignor/i)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('still reads a visible file when excludeGlobs is set but does not match it', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'scoutling-readfile-visible-'))
+    try {
+      writeFileSync(join(dir, 'plain.txt'), 'hello\n')
+
+      const tool = createReadFileTool(resolveScopeRoot(dir), { excludeGlobs: ['excluded/**'] })
+      const result = (await run(tool, { path: 'plain.txt' })) as { content: string; error?: string }
+
+      expect(result.error).toBeUndefined()
+      expect(result.content).toContain('hello')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

@@ -4,6 +4,7 @@ import { tool, type Tool } from 'ai'
 
 import { isProbablyBinary, resolvePath } from '../guardrails.js'
 import { ScoutlingError } from '../errors.js'
+import { describeExclusionReason, explainPathExclusion } from '../scope-walk.js'
 
 /** Files larger than this are refused rather than dumped whole into context. */
 const MAX_FILE_BYTES = 2 * 1024 * 1024
@@ -75,11 +76,19 @@ function formatLine(lineNumber: number, text: string): string {
  *
  * The scope root is bound at construction (a factory, not a model-supplied
  * argument) so the model can never widen its own scope by passing a
- * different root.
+ * different root. `excludeGlobs` likewise comes from config, never the
+ * model — mirrors `createListDirTool`/`createGrepTool` (Phase 5 follow-up:
+ * before this, `read_file` was the one tool of the three that ignored
+ * `excludeGlobs` and `.gitignore` entirely, so it could read `.git/HEAD` or
+ * a gitignored secret file that `list_dir` would never surface — DESIGN.md
+ * §15 "bug B").
  */
 export function createReadFileTool(
   scopeRoot: string,
+  options?: { excludeGlobs?: string[] },
 ): Tool<z.infer<typeof inputSchema>, ReadFileResult | ReadFileRefusal> {
+  const excludeGlobs = options?.excludeGlobs ?? []
+
   return tool({
     description:
       'Read a text file from the scope, with line numbers. Returns totalLines so you can ' +
@@ -100,6 +109,19 @@ export function createReadFileTool(
           return { error: error.code, message: error.message, hint: error.hint }
         }
         throw error
+      }
+
+      // Visibility is a property of the path, not of whether it currently
+      // exists (DESIGN.md §15 "bug B"), so this runs before existsSync — a
+      // caller retrying a gitignored path with a different offset should
+      // still get PATH_EXCLUDED, not PATH_NOT_FOUND, on every attempt.
+      const exclusionReason = explainPathExclusion(scopeRoot, resolvedPath, { excludeGlobs })
+      if (exclusionReason !== undefined) {
+        return {
+          error: 'PATH_EXCLUDED',
+          message: `${path} is outside the visible scope: ${describeExclusionReason(exclusionReason)}.`,
+          hint: 'This path is deliberately excluded (excludeGlobs, .gitignore, or .git/) — pick a different file.',
+        }
       }
 
       if (!existsSync(resolvedPath)) {

@@ -4,7 +4,7 @@ import { tool, type Tool } from 'ai'
 
 import { resolvePath } from '../guardrails.js'
 import { ScoutlingError } from '../errors.js'
-import { walkScope } from '../scope-walk.js'
+import { describeExclusionReason, explainPathExclusion, walkScope } from '../scope-walk.js'
 import { toonModelOutput } from '../toon.js'
 
 /** Entries beyond this are cut off; the caller gets a truncation note instead of an unbounded reply. */
@@ -118,6 +118,25 @@ export function createListDirTool(
           return { error: error.code, message: error.message, hint: error.hint }
         }
         throw error
+      }
+
+      // Guards the explicit `path` argument itself, not just what
+      // `walkScope`'s traversal would find under it (DESIGN.md §6/§15,
+      // 2026-08-28 follow-up). Without this, `list_dir(path: '.git')` or
+      // `path: 'excluded'` returned `{entries: []}` — a false *definitive
+      // empty state* (AXI principle 5): "you may not look here" rendered
+      // indistinguishably from "this directory genuinely has nothing in
+      // it," which is exactly what a definitive empty state is supposed to
+      // rule out. Runs before `existsSync` for the same reason as
+      // `read_file`: visibility is a property of the path, not of whether
+      // it currently exists.
+      const exclusionReason = explainPathExclusion(scopeRoot, resolvedPath, { excludeGlobs })
+      if (exclusionReason !== undefined) {
+        return {
+          error: 'PATH_EXCLUDED',
+          message: `${path} is outside the visible scope: ${describeExclusionReason(exclusionReason)}.`,
+          hint: 'This path is deliberately excluded (excludeGlobs, .gitignore, or .git/) — pick a different file or directory.',
+        }
       }
 
       if (!existsSync(resolvedPath)) {

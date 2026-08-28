@@ -3,7 +3,14 @@ import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { matchesGlob, walkScope, type WalkEntry } from '../src/scope-walk.js'
+import {
+  ALWAYS_EXCLUDED_GLOBS,
+  explainPathExclusion,
+  isPathVisible,
+  matchesGlob,
+  walkScope,
+  type WalkEntry,
+} from '../src/scope-walk.js'
 
 const tempDirs: string[] = []
 function tempDir(prefix: string): string {
@@ -328,5 +335,90 @@ describe('walkScope', () => {
 
     expect(result.entries).toHaveLength(1)
     expect(result.entries[0]).toEqual({ path: 'link', type: 'file', size: 0 })
+  })
+})
+
+describe('isPathVisible / explainPathExclusion (DESIGN.md §6, §15 — the shared visibility rule read_file now applies too)', () => {
+  it('exports .git/** as the structural, always-on exclusion', () => {
+    expect(ALWAYS_EXCLUDED_GLOBS).toEqual(['.git/**'])
+  })
+
+  it('a plain file is visible', () => {
+    const root = tempDir('scoutling-visible-plain-')
+    writeFileSync(join(root, 'a.txt'), 'a')
+
+    expect(isPathVisible(root, join(root, 'a.txt'))).toBe(true)
+    expect(explainPathExclusion(root, join(root, 'a.txt'))).toBeUndefined()
+  })
+
+  it('a hidden (dot-prefixed) file or directory is visible — the whole point of bug A', () => {
+    const root = tempDir('scoutling-visible-hidden-')
+    writeFileSync(join(root, '.dotfile.md'), 'x')
+    mkdirSync(join(root, '.github', 'workflows'), { recursive: true })
+    writeFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'x')
+
+    expect(isPathVisible(root, join(root, '.dotfile.md'))).toBe(true)
+    expect(isPathVisible(root, join(root, '.github', 'workflows', 'ci.yml'))).toBe(true)
+  })
+
+  it('a file under .git/ is never visible, and the reason names the git rule — even with no excludeGlobs at all', () => {
+    const root = tempDir('scoutling-visible-git-')
+    mkdirSync(join(root, '.git'), { recursive: true })
+    writeFileSync(join(root, '.git', 'HEAD'), 'ref: refs/heads/main')
+
+    expect(isPathVisible(root, join(root, '.git', 'HEAD'))).toBe(false)
+    expect(explainPathExclusion(root, join(root, '.git', 'HEAD'))).toEqual({ rule: 'git' })
+  })
+
+  it('.git/ stays excluded even when excludeGlobs is narrowed to something that never mentions it', () => {
+    const root = tempDir('scoutling-visible-git-backstop-')
+    mkdirSync(join(root, '.git'), { recursive: true })
+    writeFileSync(join(root, '.git', 'HEAD'), 'ref: refs/heads/main')
+
+    expect(isPathVisible(root, join(root, '.git', 'HEAD'), { excludeGlobs: ['some-other-dir/**'] })).toBe(false)
+  })
+
+  it('a path matched by excludeGlobs is invisible, and the reason names the matching glob', () => {
+    const root = tempDir('scoutling-visible-excludeglobs-')
+    mkdirSync(join(root, 'excluded'), { recursive: true })
+    writeFileSync(join(root, 'excluded', 'f.md'), 'x')
+
+    const reason = explainPathExclusion(root, join(root, 'excluded', 'f.md'), { excludeGlobs: ['excluded/**'] })
+    expect(reason).toEqual({ rule: 'excludeGlobs', glob: 'excluded/**' })
+  })
+
+  it('a gitignored path is invisible, and the reason names the gitignore rule', () => {
+    const root = tempDir('scoutling-visible-gitignore-')
+    writeFileSync(join(root, '.gitignore'), 'secret.env\n')
+    writeFileSync(join(root, 'secret.env'), 'x')
+
+    expect(isPathVisible(root, join(root, 'secret.env'))).toBe(false)
+    expect(explainPathExclusion(root, join(root, 'secret.env'))).toEqual({ rule: 'gitignore' })
+  })
+
+  it('a file nested under a gitignored directory is invisible even though the file itself is never named', () => {
+    const root = tempDir('scoutling-visible-gitignore-dir-')
+    writeFileSync(join(root, '.gitignore'), 'ignored-dir/\n')
+    mkdirSync(join(root, 'ignored-dir'), { recursive: true })
+    writeFileSync(join(root, 'ignored-dir', 'f.md'), 'x')
+
+    expect(isPathVisible(root, join(root, 'ignored-dir', 'f.md'))).toBe(false)
+  })
+
+  it('checks visibility for a path that does not exist yet — a property of the path, not of existence', () => {
+    const root = tempDir('scoutling-visible-nonexistent-')
+    writeFileSync(join(root, '.gitignore'), 'secret.env\n')
+
+    // Never created on disk — read_file calls explainPathExclusion before
+    // its own existsSync check specifically so this doesn't crash or
+    // silently report "visible".
+    expect(isPathVisible(root, join(root, 'secret.env'))).toBe(false)
+    expect(isPathVisible(root, join(root, 'never-existed.txt'))).toBe(true)
+  })
+
+  it('the scope root itself is always visible', () => {
+    const root = tempDir('scoutling-visible-root-')
+    expect(isPathVisible(root, root)).toBe(true)
+    expect(explainPathExclusion(root, root)).toBeUndefined()
   })
 })

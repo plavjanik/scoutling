@@ -7,7 +7,7 @@ import { z } from 'zod'
 import { tool, type Tool } from 'ai'
 
 import { isProbablyBinary, resolvePath } from '../guardrails.js'
-import { walkScope } from '../scope-walk.js'
+import { walkScope, ALWAYS_EXCLUDED_GLOBS, describeExclusionReason, explainPathExclusion } from '../scope-walk.js'
 import { ScoutlingError } from '../errors.js'
 import { toonModelOutput } from '../toon.js'
 
@@ -231,7 +231,26 @@ async function runRipgrep(rgPath: string, args: BackendArgs): Promise<RipgrepOut
   // honour .gitignore unconditionally, which is what a scope root that
   // isn't itself a git checkout still needs.
   flags.push('--no-require-git')
-  for (const excludeGlob of excludeGlobs) flags.push('--glob', `!${excludeGlob}`)
+  // DESIGN.md §6/§15 (bug A): ripgrep skips dot-files and dot-directories
+  // unless told otherwise, which made grep blind to anything list_dir and
+  // read_file could both see — e.g. `.github/workflows/ci.yml` was listable
+  // and readable but unsearchable. `--hidden` makes grep agree with the
+  // other two tools that hidden entries are in scope.
+  flags.push('--hidden')
+  // That widens what `--hidden` reaches to include `.git/`, which is the one
+  // dot-directory this tool must never search regardless of config (it's
+  // enormous and never useful as text) — so `ALWAYS_EXCLUDED_GLOBS` goes
+  // into the same `--glob '!...'` list as the caller's own `excludeGlobs`,
+  // unconditionally, rather than relying on the caller to have kept
+  // '.git/**' in its own list. Verified against the installed ripgrep
+  // 15.0.0 with a scratch fixture (`hello` in both `.git/HEAD` and a
+  // tracked file): `rg --hidden --glob '!.git/**' -e hello .` finds the
+  // tracked file only, `.git/HEAD` is never matched — same result with
+  // `--glob '!.git/'` (either glob form works; `/**` is used here to match
+  // the exact string `ALWAYS_EXCLUDED_GLOBS` already carries for `list_dir`
+  // and `read_file`, so there is exactly one spelling of "exclude .git" in
+  // this codebase, not two).
+  for (const excludeGlob of [...ALWAYS_EXCLUDED_GLOBS, ...excludeGlobs]) flags.push('--glob', `!${excludeGlob}`)
 
   const rgArgs = [...flags, '-e', pattern, '--', searchTarget]
 
@@ -472,6 +491,16 @@ function parseRipgrepWithContext(
  * Capped in two ways ripgrep doesn't need: a pattern-length refusal (no
  * linear-time guarantee without a real regex engine) and a per-file
  * wall-clock budget so one huge file can't hang the run.
+ *
+ * Needs no `--hidden` equivalent: unlike ripgrep, `walkScope` never skipped
+ * dot-files or dot-directories in the first place (bug A, DESIGN.md §15) —
+ * it was `runRipgrep` that had to be widened to match `walkScope`'s
+ * existing behaviour, not the other way round. It also needs no separate
+ * `.git/**` exclusion here: `walkScope` applies `ALWAYS_EXCLUDED_GLOBS`
+ * unconditionally (see `isExcludedByGlobs` in `scope-walk.ts`), so passing
+ * `excludeGlobs` straight through is enough for the two engines to agree —
+ * `grep.test.ts`'s "ripgrep and fallback agree on hidden files" case pins
+ * this.
  */
 function runFallback(args: BackendArgs): GrepResult | GrepRefusal {
   const { scopeRoot, resolvedPath, displayPath, pattern, glob, caseSensitive, excludeGlobs, maxMatches, contextLines } =
@@ -685,6 +714,26 @@ export function createGrepTool(
           return { error: error.code, message: error.message, hint: error.hint }
         }
         throw error
+      }
+
+      // Guards the explicit `path` argument itself, not just what a
+      // traversal would find under it (DESIGN.md §6/§15, 2026-08-28
+      // follow-up). Neither backend can be trusted to enforce this on its
+      // own: ripgrep searches an explicitly-named file or directory
+      // regardless of `--glob` flags (see `runRipgrep`'s doc comment on
+      // `--glob '!...'`, which only prunes traversal), so `path:
+      // 'secret.env'` or `path: '.git/FAKE_SECRET'` would otherwise return a
+      // real match — a genuine content leak, not just an inconsistency with
+      // `list_dir`. Runs before `existsSync` for the same reason as
+      // `read_file`: visibility is a property of the path, not of whether it
+      // currently exists.
+      const exclusionReason = explainPathExclusion(scopeRoot, resolvedPath, { excludeGlobs })
+      if (exclusionReason !== undefined) {
+        return {
+          error: 'PATH_EXCLUDED',
+          message: `${path} is outside the visible scope: ${describeExclusionReason(exclusionReason)}.`,
+          hint: 'This path is deliberately excluded (excludeGlobs, .gitignore, or .git/) — pick a different file or directory.',
+        }
       }
 
       if (!existsSync(resolvedPath)) {

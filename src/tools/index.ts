@@ -9,7 +9,13 @@ export { createReadFileTool } from './read-file.js'
 export interface ToolSetOptions {
   /** The scope root every tool is bound to — never model-supplied. */
   scopeRoot: string
-  /** Passed through to `list_dir` and `grep`; config's excludeGlobs, never the model's. */
+  /**
+   * Passed through to all three tools; config's excludeGlobs, never the
+   * model's. Until DESIGN.md §15's fix, `read_file` was the one tool that
+   * ignored this entirely (and `.gitignore`, and `.git/`) — see
+   * `explainPathExclusion` in `scope-walk.ts` for the shared rule all three
+   * now apply.
+   */
   excludeGlobs?: string[]
 }
 
@@ -42,7 +48,7 @@ export type ToolSet = {
  */
 export function createTools(options: ToolSetOptions): ToolSet {
   return {
-    read_file: createReadFileTool(options.scopeRoot),
+    read_file: createReadFileTool(options.scopeRoot, { excludeGlobs: options.excludeGlobs }),
     list_dir: createListDirTool(options.scopeRoot, { excludeGlobs: options.excludeGlobs }),
     grep: createGrepTool(options.scopeRoot, { excludeGlobs: options.excludeGlobs }),
   }

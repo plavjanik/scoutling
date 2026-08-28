@@ -144,15 +144,36 @@ These cost real time to discover; the type checker does not catch the first two.
 - `data.path` in `--json` output can be `{bytes}` rather than `{text}` for a non-UTF-8 path;
   skip such a record instead of crashing. One `match` record with several `submatches` is still
   one matching *line* — do not emit it twice.
-- **ripgrep skips hidden files and directories unless `--hidden` is passed, and `grep.ts` does
-  not pass it.** `scope-walk.ts` (behind `list_dir`) has no hidden-file rule of its own, so the
-  two tools disagree in exactly the way `--no-require-git` was added to prevent: in a scope with
-  a non-gitignored `.claude/`, `list_dir` lists the file, `read_file` reads it, and `grep` cannot
-  find a single string in it. Verified by running the binary both ways against `local-ai`. **Not
-  fixed** — the fix direction is a real decision (widen `grep` and inherit `.git/`, or narrow the
-  walk and hide `.github/`), written up in DESIGN.md §15. Until it is settled, do not assume a
-  scope's dotfiles are searchable, and do not write an eval question whose answer lives under
-  one.
+- **ripgrep skips hidden files and directories unless `--hidden` is passed.** `grep.ts` now
+  passes it unconditionally — verified by running the binary both ways against `local-ai`
+  (`139 tickers` lives only in a `.claude/`-nested doc; `rg --no-require-git` found nothing,
+  `rg --no-require-git --hidden` found it). This is fixed (2026-08-28, DESIGN.md §15): all three
+  tools now agree that hidden files/dirs are visible, decided in favour of widening `grep` rather
+  than narrowing `list_dir`/`read_file`, since `.github/`, `.claude/`, `.circleci/`, `.vscode/`
+  are legitimate investigation targets.
+- **`--hidden` also reaches `.git/`, so it must be excluded explicitly — both `--glob '!.git/**'`
+  and `--glob '!.git/'` genuinely stop ripgrep descending into it**, verified against the
+  installed binary with a scratch fixture (`hello` written into both `.git/HEAD` and a tracked
+  file): `rg --hidden --glob '!.git/**' -e hello .` and the `!.git/` form both match only the
+  tracked file. `grep.ts` uses `/**` — the same string `scope-walk.ts` exports as
+  `ALWAYS_EXCLUDED_GLOBS`, applied on both the ripgrep flags and the JS fallback's `walkScope`
+  call, unconditionally rather than trusting the caller's `excludeGlobs` to still contain it
+  (config layers *replace* that key, never merge it).
+- **All three tools now share one visibility predicate — applied to both a traversal's results
+  and a tool's own `path` argument.** `scope-walk.ts`'s `isPathVisible`/`explainPathExclusion` is
+  the single source of truth for "is this path in scope" (inside the scope root, not
+  `excludeGlobs`-matched, not gitignored, not under `.git/`); `walkScope` (behind `list_dir` and
+  the grep JS fallback) calls through the same `isExcludedByGlobs` helper rather than keeping its
+  own copy. All three tools *also* call `explainPathExclusion` directly on their own
+  model-supplied `path` argument, immediately after `resolvePath` and before `existsSync`, so
+  naming an excluded path explicitly refuses the same way a traversal that stumbled onto it
+  would. The refusal wording (`describeExclusionReason`) lives once in `scope-walk.ts`, not
+  copied per tool. Before the first fix, `read_file` ignored `excludeGlobs`/`.gitignore`/`.git/`
+  entirely and would happily read `.git/HEAD`; before the follow-up (2026-08-28), `grep` and
+  `list_dir` checked traversal results but not an explicitly-named excluded `path` — so
+  `grep(pattern, path: 'secret.env')` leaked a real match (ripgrep searches an explicitly-named
+  path regardless of `--glob`) and `list_dir(path: '.git')` returned a false `{entries: []}`
+  instead of refusing.
 
 ## Conventions already established in code — match them
 
