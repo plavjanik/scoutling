@@ -672,6 +672,38 @@ delegation rule; review, eval grading and the README claims stay in the main loo
 >   urgent — the failure mode is a slow, noisy run rather than a wrong answer — but it will bite
 >   whoever writes the first real per-repo config without reading this.
 
+> **Found by the Phase 6 uncapped measurement** (2026-08-29, measured; triaged as "after the
+> eval baseline exists"):
+>
+> - **Extra steps are spent re-reading files the run already has, not on new evidence.** Raising
+>   the caps does not buy more investigation; it buys more looping. Measured on
+>   `qwen/qwen3-coder-next` against `local-ai`, comparing the `normal` preset against a
+>   deliberately absurd budget (40 steps / 400 KB):
+>
+>   | question | steps normal → uncapped | bytes normal → uncapped |
+>   |---|---|---|
+>   | `book-sweep-strategy-count` | 3 → 18 | 17.7 → 13.7 KB |
+>   | `backtest-runner-header` | 7 → 35 | 24.2 → 22.6 KB |
+>   | `candidate-hunter-layers` | 9 → 38 | 88.1 → 69.5 KB |
+>   | `form4-ticker-count` | 8 → 24 | 86.5 → 10.3 KB |
+>
+>   Steps balloon 3-6x while bytes stay flat or *fall*. The last two are the important rows: both
+>   **exhausted** the 80 KB cap under `normal`, yet needed only 69.5 KB and 10.3 KB when nothing
+>   truncated them. Their byte exhaustion was therefore not evidence-hunger — it was the same
+>   files being read again inside a longer loop. It also means the step cap is a **forcing
+>   function**, not merely a limit: it is what makes the model conclude, and sizing `maxSteps`
+>   from an uncapped run is invalid because the model expands to fill whatever ceiling it is
+>   given. (The byte figures do stay meaningful across budgets, which is why they are the half of
+>   that measurement worth keeping.)
+>
+>   Candidate fixes, in rough order of confidence: a **within-run duplicate-read guard** —
+>   `read_file` recognises a `path`+`offset`+`limit` it already returned this run and refuses with
+>   a pointer back to the step that has it, instead of re-sending the bytes (structural, testable,
+>   and attacks the measured waste directly); or system-prompt guidance not to re-read (cheap and
+>   reversible, but it is advice a small local model may ignore). Deliberately **not** done before
+>   the eval baseline exists: changing tool behaviour now would move the baseline the eval is
+>   establishing, and a preset effect could no longer be told apart from a tool effect.
+
 1. **Read-only git tools** — `git_log`, `git_blame`, `git_diff` (execFile, `--` guarded). "When
    did X change and why" is the most common question the three fs tools can't answer. v0.2.
 2. **`scoutling init <agent>`** — write the Skill / AGENTS.md / OpenCode agent / Cursor rule for
