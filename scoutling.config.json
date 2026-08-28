@@ -1,0 +1,15 @@
+{
+  "excludeGlobs": [
+    "node_modules/**",
+    ".git/**",
+    "dist/**",
+    "out/**",
+    ".claude/skills/ai-sdk/**",
+    ".claude/skills/axi/**",
+    ".claude/skills/codebase-design/**",
+    ".claude/skills/domain-modeling/**",
+    ".claude/skills/tdd/**",
+    ".claude/skills/ts-library/**",
+    ".claude/skills/vitest/**"
+  ]
+}

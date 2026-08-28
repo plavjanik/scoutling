@@ -639,6 +639,23 @@ delegation rule; review, eval grading and the README claims stay in the main loo
 > 'PATH_EXCLUDED'` and `matches` absent, not merely "no error") across both the ripgrep and
 > fallback engines.
 
+> **Found while configuring the Phase 6 eval** (2026-08-28, untriaged):
+>
+> - **`excludeGlobs` config layers *replace* the built-in list rather than merging with it**, so
+>   setting it at all silently drops `node_modules/**`, `dist/**` and `out/**`. Concretely: adding
+>   one vendored-docs glob to a repo's `scoutling.config.json` requires re-listing all four
+>   built-in entries or the run starts walking `node_modules`. Both configs written for the Phase 6
+>   eval had to do exactly that, which is the smell. `.git/**` is no longer affected — it is
+>   enforced structurally by `ALWAYS_EXCLUDED_GLOBS` regardless of config — but the other three are
+>   ordinary defaults with nothing protecting them.
+>   Per-key replacement is the deliberate rule for every other config key (§5) and is right for
+>   scalars, so the question is whether `excludeGlobs` should be the one list-valued key that
+>   appends instead, or whether the fix is `doctor` warning when a config's `excludeGlobs` omits a
+>   built-in entry. The second keeps one layering rule and makes the surprise visible exactly where
+>   the user is already asking "why is it behaving like this?", which is what `doctor` is for. Not
+>   urgent — the failure mode is a slow, noisy run rather than a wrong answer — but it will bite
+>   whoever writes the first real per-repo config without reading this.
+
 1. **Read-only git tools** — `git_log`, `git_blame`, `git_diff` (execFile, `--` guarded). "When
    did X change and why" is the most common question the three fs tools can't answer. v0.2.
 2. **`scoutling init <agent>`** — write the Skill / AGENTS.md / OpenCode agent / Cursor rule for
