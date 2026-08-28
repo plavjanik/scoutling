@@ -161,6 +161,13 @@ These cost real time to discover; the type checker does not catch the first two.
 - **Never degrade silently.** The JS search fallback runs only when the ripgrep binary is
   genuinely missing; every other ripgrep failure is a refusal, and the result always carries
   `engine`. Answering with a weaker engine without saying so is how a wrong answer looks right.
+- **Tool result rows stay uniform within one response.** TOON's tabular form only collapses when
+  every element of an array has the same keys, so an optional per-entry field must be present on
+  all rows or none. `grep` follows this: `kind` appears on every entry when `contextLines > 0`
+  and on none at `contextLines: 0`, which is also what keeps the default response byte-identical
+  to before that option existed. A field added to *some* rows silently drops the whole array back
+  to the verbose one-key-per-line form — no error, just a much larger bill against the byte
+  budget: a three-row result measures 87 bytes uniform and 162 with a single key missing.
 - **Bytes mean what the model receives.** The byte budget and the `--verbose` step log both read
   `ToolOutputBudget`'s own accounting, which measures the rendered `toModelOutput` (TOON for
   `list_dir`/`grep`) rather than `JSON.stringify` of the structured result — 239 bytes of JSON
