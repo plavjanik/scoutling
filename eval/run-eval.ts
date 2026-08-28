@@ -10,8 +10,8 @@
  * `tsdown` entry point. `docs/eval.md` explains what it answers, what it
  * doesn't, and how to grade the output.
  */
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { isBudgetPreset, resolveBudget } from '../src/budget.js'
@@ -460,6 +460,52 @@ function slugifyModel(model: string): string {
   return model.toLowerCase().replace(/[^a-z0-9._-]/g, '-')
 }
 
+// --- questions-file self-exclusion --------------------------------------------------------------
+
+/**
+ * Convert an already-relative path to the POSIX-separated form
+ * `excludeGlobs`/`matchesGlob` expect (`src/scope-walk.ts`'s own `toPosix`
+ * does the equivalent split-on-`sep`-then-join, kept local here per the
+ * frozen contract rather than exported from that module). Unconditionally
+ * strips `\` too, not just whatever `path.sep` is on the host — `sep` is `/`
+ * on every platform this actually runs the eval on, so a plain
+ * split-on-`sep` would be a silent no-op for a path that happens to contain
+ * a literal backslash, and would make the Windows-separator behaviour
+ * untestable outside an actual Windows CI runner.
+ */
+export function toPosixExcludeGlob(relativePath: string): string {
+  return relativePath.split(sep).join('/').replace(/\\/g, '/')
+}
+
+/**
+ * If the question-set file lives inside the repo it asks about, return its
+ * repo-root-relative, POSIX-separated path; `undefined` when it's outside
+ * `repoRoot` (nothing to exclude).
+ *
+ * Why this exists at all: an auto-graded question's `expect.fact` states the
+ * answer in plain English (CLAUDE.md: "the eval's question file contains the
+ * answers"), so if the file sits inside the scanned scope, `grep`/`read_file`
+ * can find it directly and a model can "answer" by quoting the question file
+ * instead of investigating the actual source. That produces an `auto: pass`
+ * that proves nothing, and Phase 6 tunes the §7 budget presets from exactly
+ * these numbers — a contaminated eval looks identical to a clean one in its
+ * output, so this has to be automatic. A caller cannot forget a step that
+ * never existed for them to forget.
+ *
+ * `questionsPath` is realpath'd before comparing: `repoRoot` already went
+ * through `resolveScopeRoot`'s `realpathSync`, but `questionsPath` did not,
+ * and on macOS a temp dir under `/var` is itself a symlink to `/private/var`
+ * — comparing an un-realpath'd file path against a realpath'd root would
+ * make every path look like it starts with `..` even when the file is
+ * plainly inside the root. Safe to call unconditionally here: by the time
+ * this runs, the file has already been read successfully, so it exists.
+ */
+function questionsFileExcludeGlob(repoRoot: string, questionsPath: string): string | undefined {
+  const rel = relative(repoRoot, realpathSync(questionsPath))
+  if (rel.length === 0 || rel.startsWith('..') || isAbsolute(rel)) return undefined
+  return toPosixExcludeGlob(rel)
+}
+
 // --- I/O interface (Part B6) -------------------------------------------------------------------
 
 /** What `EvalRunInput.budget` names by preset; `defaultRunQuestion` resolves it to a full `Budget` right before calling `runScoutling`, mirroring the frozen call shape in DESIGN's Part B3. */
@@ -753,6 +799,21 @@ export async function runEval(io: EvalIo): Promise<number> {
     return emitError(error instanceof ScoutlingError ? error : new ScoutlingError('INTERNAL', String(error)))
   }
 
+  // Once repoRoot and questionsPath are both resolved (frozen contract Part
+  // 1): compute the self-exclusion once for the whole invocation, and warn
+  // once — never silently, per CLAUDE.md's "never degrade silently" (this
+  // is not a degrade, it's an alteration, which is the same obligation).
+  const questionsFileExclude = questionsFileExcludeGlob(repoRoot, questionsPath)
+  if (questionsFileExclude !== undefined) {
+    writeStderr(
+      `${JSON.stringify({
+        warning: 'QUESTIONS_FILE_EXCLUDED',
+        message: `The question-set file (${questionsFileExclude}) is inside --repo, so it was excluded from every run's scope: its own expect.fact fields would otherwise hand a model the answers instead of the source.`,
+        hint: 'Keep the question set outside --repo to avoid this, or ignore this notice — the exclusion is automatic either way.',
+      })}\n`,
+    )
+  }
+
   const runsPerCell = args.runs ?? temperatures.length
   const outDir = resolve(cwd, args.outDir ?? DEFAULT_OUT_DIR)
 
@@ -788,6 +849,14 @@ export async function runEval(io: EvalIo): Promise<number> {
         },
       })
       config = loaded.config
+      // Appended after config resolution, so a repo's own
+      // scoutling.config.json/.local.json cannot drop it — the same
+      // structural-exclusion spirit as scope-walk.ts's ALWAYS_EXCLUDED_GLOBS,
+      // kept local to the eval harness per the frozen contract rather than
+      // touching that module.
+      if (questionsFileExclude !== undefined) {
+        config = { ...config, excludeGlobs: [...config.excludeGlobs, questionsFileExclude] }
+      }
     } catch (error) {
       return emitError(error instanceof ScoutlingError ? error : new ScoutlingError('INTERNAL', String(error)))
     }

@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { runEval, type EvalIo, type EvalRunInput } from '../eval/run-eval.js'
+import { runEval, toPosixExcludeGlob, type EvalIo, type EvalRunInput } from '../eval/run-eval.js'
 import type { RunResult } from '../src/loop.js'
 
 const fixtureRepo = resolve(import.meta.dirname, 'fixtures/scope')
@@ -450,6 +450,78 @@ describe('runEval — output files', () => {
       // column's value, then an empty correct? cell, then the row-closing pipe).
       expect(runRow?.trim().endsWith('| |')).toBe(true)
     })
+  })
+})
+
+describe('runEval — questions-file self-exclusion', () => {
+  // These questions live at the repo root the eval is investigating (see
+  // eval/questions.example.json's own doc comment): "the eval's question
+  // file contains the answers" (task brief) is not a hypothetical — an
+  // auto-graded question's expect.fact literally states the fact under test,
+  // so a model that can grep the question file itself would "pass" without
+  // investigating anything. This whole block proves the automatic exclusion
+  // that prevents that, per the frozen contract in the task brief.
+
+  it('a questions file inside --repo is added to excludeGlobs (repo-relative, POSIX) and warns once on stderr', async () => {
+    await withTempDir(async (dir) => {
+      // dir is both --repo and where the question file lives, so its
+      // repo-relative path is just the bare filename.
+      const path = writeQuestionFile(dir, basicQuestionFile({ questions: [{ id: 'q1', question: 'A?' }] }))
+      const { io, calls, stderr } = buildIo(['--models', 'model-a', '--questions', path, '--repo', dir, '--temperatures', '0'])
+      const code = await runEval(io)
+
+      expect(code).toBe(0)
+      expect(calls).toHaveLength(1)
+      expect(calls[0]?.config.excludeGlobs).toContain('questions.json')
+
+      const warnings = stderr.filter((line) => line.includes('QUESTIONS_FILE_EXCLUDED'))
+      expect(warnings).toHaveLength(1)
+      const parsed = JSON.parse(warnings[0]!.trim())
+      expect(parsed.warning).toBe('QUESTIONS_FILE_EXCLUDED')
+      expect(parsed.message).toContain('questions.json')
+    })
+  })
+
+  it('a questions file outside --repo leaves excludeGlobs unchanged and emits no warning', async () => {
+    await withTempDir(async (dir) => {
+      // The existing fixture setup already has this shape: the question file
+      // lives in a temp dir, --repo is the separate fixtures/scope tree.
+      const path = writeQuestionFile(dir, basicQuestionFile({ questions: [{ id: 'q1', question: 'A?' }] }))
+      const { io, calls, stderr } = buildIo(['--models', 'model-a', '--questions', path, '--repo', fixtureRepo, '--temperatures', '0'])
+      const code = await runEval(io)
+
+      expect(code).toBe(0)
+      expect(calls).toHaveLength(1)
+      expect(calls[0]?.config.excludeGlobs).not.toContain('questions.json')
+      expect(calls[0]?.config.excludeGlobs).toEqual(
+        expect.not.arrayContaining([expect.stringContaining('questions.json')]),
+      )
+
+      expect(stderr.some((line) => line.includes('QUESTIONS_FILE_EXCLUDED'))).toBe(false)
+    })
+  })
+
+  it('the appended exclusion survives alongside a config-supplied excludeGlobs, rather than replacing it', async () => {
+    await withTempDir(async (dir) => {
+      writeFileSync(join(dir, 'scoutling.config.json'), JSON.stringify({ excludeGlobs: ['custom/**'] }))
+      const path = writeQuestionFile(dir, basicQuestionFile({ questions: [{ id: 'q1', question: 'A?' }] }))
+      const { io, calls } = buildIo(['--models', 'model-a', '--questions', path, '--repo', dir, '--temperatures', '0'])
+      const code = await runEval(io)
+
+      expect(code).toBe(0)
+      expect(calls[0]?.config.excludeGlobs).toContain('custom/**')
+      expect(calls[0]?.config.excludeGlobs).toContain('questions.json')
+    })
+  })
+})
+
+describe('toPosixExcludeGlob', () => {
+  it('converts Windows-style backslash separators to POSIX forward slashes', () => {
+    expect(toPosixExcludeGlob('sub\\dir\\questions.json')).toBe('sub/dir/questions.json')
+  })
+
+  it('leaves an already-POSIX relative path unchanged', () => {
+    expect(toPosixExcludeGlob('docs/scoutling-eval.json')).toBe('docs/scoutling-eval.json')
   })
 })
 

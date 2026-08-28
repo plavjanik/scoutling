@@ -142,6 +142,29 @@ delegation history — not part of this repo):
 pnpm eval --questions ../local-ai/docs/scoutling-eval.json --repo ../local-ai --models qwen/qwen3-coder-next
 ```
 
+### A question file inside the repo it asks about is excluded automatically
+
+An auto-gradable question's `expect.fact` states, in plain English, the fact the answer must
+surface — that is the answer. If the question-set file itself sits inside `--repo`, it is fair
+game for `grep`/`read_file` just like any other file in scope, so a model could "answer" a
+question by finding and quoting the question file instead of investigating the actual source. The
+result would auto-grade `pass` while proving nothing, and silently inflate every score — exactly
+the failure this harness exists to catch, undetectably: a contaminated eval looks identical to a
+clean one in its output.
+
+So `runEval` appends the question file's own repo-relative path to `excludeGlobs` for every run in
+the invocation, whenever the resolved `--questions` file is inside the resolved `--repo`. This
+happens after config is loaded, so a repo's own `scoutling.config.json`/`.local.json` cannot drop
+it (mirroring `src/scope-walk.ts`'s `ALWAYS_EXCLUDED_GLOBS`, kept local to the eval harness). It is
+automatic, not a step to remember — a warning of the form `{"warning":"QUESTIONS_FILE_EXCLUDED", ...}`
+is printed to stderr once per invocation whenever this actually happens, naming the excluded path.
+
+`eval/questions.example.json`, used against scoutling's own repo, and `local-ai/docs/scoutling-eval.json`,
+used against `local-ai`, are both real instances of this — see `local-ai`'s `docs/scoutling-eval.json`
+question file's own `expect.fact` entries for what would otherwise leak. A question set kept
+**outside** the repo it asks about (a separate directory, as most of DESIGN.md §12's examples show)
+needs no special handling: `excludeGlobs` is left untouched and no warning is printed.
+
 ## Where results land
 
 Every invocation shares one timestamp, `<out-dir>/<YYYY-MM-DDTHH-mm-ssZ>-...` (colons are stripped
