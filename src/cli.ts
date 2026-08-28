@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url'
 import { APICallError, RetryError } from 'ai'
 
 import { isBudgetPreset, resolveBudget } from './budget.js'
+import { runDoctorCommand, runModelsCommand } from './commands.js'
 import { loadConfig } from './config.js'
 import { ScoutlingError } from './errors.js'
 import { resolvePath, resolveScopeRoot } from './guardrails.js'
@@ -18,6 +19,17 @@ const USAGE = `🐦 scoutling — read-only, bounded codebase investigation with
 scoutling "<question>" --model <id> [--path <dir>] [--base-url <url>] [--api-key <key>]
           [--budget quick|normal|deep] [--max-steps <n>] [--max-tool-bytes <n>] [--timeout-ms <n>]
           [--format text|json] [--require-citations] [--verbose]
+scoutling -                    Read the question from stdin instead of an argument (long
+                                prompts from a parent agent). Empty/whitespace-only stdin is
+                                an error.
+scoutling models [--format text|json] [--base-url <url>] [--api-key <key>] [--path <dir>]
+                                GET <base-url>/models — what can I pass to --model? Does not
+                                require --model. See 'scoutling models --help'.
+scoutling doctor [--format text|json] [--base-url <url>] [--api-key <key>] [--path <dir>]
+                                Resolved config + which layer set each key, plus reachability,
+                                model-presence, ripgrep-binary and context-length checks. Does
+                                not require --model; a nonzero exit means it found problems. See
+                                'scoutling doctor --help'.
 scoutling --help
 
 Runs a bounded, read-only investigation of the directory tree at --path (default: the current
@@ -36,11 +48,18 @@ directory) and prints a cited answer to stdout.
   --verbose             Log one line per step to stderr (tool name, args, bytes returned).
   --help                Print this message and exit 0.
 
+Note: "scoutling models" and "scoutling doctor" are recognised as subcommands only when the
+entire, single-word question is exactly "models" or "doctor" — an accepted casualty; quote a
+longer question to avoid the collision.
+
 Examples:
   scoutling "Where is resolvePath defined?" --model qwen/qwen3-coder-next
   scoutling "What does this repo do?" --path ../other-repo --model qwen/qwen3-next-80b --verbose
   scoutling "Survey the auth module" --model qwen/qwen3-next-80b --budget deep
-  scoutling "Where is X validated?" --model qwen/qwen3-coder-next --format json --require-citations`
+  scoutling "Where is X validated?" --model qwen/qwen3-coder-next --format json --require-citations
+  echo "A long question from a parent agent..." | scoutling -
+  scoutling models
+  scoutling doctor`
 
 export interface ParsedArgs {
   help: boolean
@@ -218,6 +237,13 @@ export interface CliIO {
   fetch?: typeof fetch
   writeStdout?: (text: string) => void
   writeStderr?: (text: string) => void
+  /**
+   * Reads the question for `scoutling -` (DESIGN.md §9: long prompts from a
+   * parent agent). Kept just as injectable as `fetch`/the writers so this
+   * stays hermetically testable — `runCli` never reads `process.stdin`
+   * directly. The real reader lives in `main()`, not here.
+   */
+  readStdin?: () => Promise<string>
 }
 
 /**
@@ -234,6 +260,27 @@ export async function runCli(io: CliIO): Promise<number> {
     return error.exitCode
   }
 
+  // Subcommand dispatch happens before parseArgs, and only on the *first*
+  // argv token, matching "recognised only when the subcommand is the first
+  // positional argument" — parseArgs would otherwise treat a bare "models"
+  // or "doctor" as a perfectly valid one-word question. That collision is a
+  // documented, accepted casualty (see USAGE): it only bites a question that
+  // is exactly that single word. Each subcommand validates its own flags
+  // (unknown-flag strictness is per-command, same as the main command's).
+  const subcommand = io.argv[0]
+  if (subcommand === 'models' || subcommand === 'doctor') {
+    const subcommandIo = {
+      env: io.env,
+      cwd: io.cwd,
+      fetch: io.fetch,
+      writeStdout,
+      writeStderr,
+    }
+    return subcommand === 'models'
+      ? runModelsCommand(io.argv.slice(1), subcommandIo)
+      : runDoctorCommand(io.argv.slice(1), subcommandIo)
+  }
+
   let args: ParsedArgs
   try {
     args = parseArgs(io.argv)
@@ -244,6 +291,43 @@ export async function runCli(io: CliIO): Promise<number> {
   if (args.help) {
     writeStdout(`${USAGE}\n`)
     return 0
+  }
+
+  // "scoutling -": the question comes from stdin instead of argv, e.g. a
+  // parent agent piping a long prompt it would rather not risk truncating
+  // or mis-escaping as a single shell argument.
+  if (args.question === '-') {
+    if (io.readStdin === undefined) {
+      return emitError(
+        new ScoutlingError(
+          'INTERNAL',
+          'No stdin reader is available to read the question.',
+          'This is a scoutling bug; please report it.',
+        ),
+      )
+    }
+    let stdinText: string
+    try {
+      stdinText = await io.readStdin()
+    } catch (error) {
+      return emitError(
+        new ScoutlingError('BAD_ARGS', `Could not read the question from stdin: ${error instanceof Error ? error.message : String(error)}`),
+      )
+    }
+    // Trim trailing whitespace only (a trailing newline from `echo`/a
+    // pasted prompt is noise, not part of the question); leading whitespace
+    // is left alone as potentially meaningful formatting.
+    const trimmed = stdinText.replace(/\s+$/, '')
+    if (trimmed.length === 0) {
+      return emitError(
+        new ScoutlingError(
+          'BAD_ARGS',
+          'No question was provided on stdin.',
+          'Pipe a non-empty question, e.g.: echo "..." | scoutling -',
+        ),
+      )
+    }
+    args.question = trimmed
   }
 
   let scopeRoot: string
@@ -399,10 +483,18 @@ export function isDirectEntry(importMetaUrl: string, argv1: string | undefined):
   return importMetaUrl === pathToFileURL(argv1).href
 }
 
+/** Reads all of `process.stdin` as utf8 — the real implementation behind `scoutling -`, kept out of `runCli` itself. */
+async function readProcessStdin(): Promise<string> {
+  process.stdin.setEncoding('utf8')
+  const chunks: string[] = []
+  for await (const chunk of process.stdin) chunks.push(chunk as string)
+  return chunks.join('')
+}
+
 async function main(): Promise<void> {
   // Set the code rather than calling process.exit(), which can truncate a
   // still-draining stdout — and stdout is the whole product here.
-  process.exitCode = await runCli({ argv: process.argv.slice(2) })
+  process.exitCode = await runCli({ argv: process.argv.slice(2), readStdin: readProcessStdin })
 }
 
 if (isDirectEntry(import.meta.url, process.argv[1])) {

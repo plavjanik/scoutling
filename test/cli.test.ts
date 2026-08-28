@@ -585,6 +585,141 @@ describe('runCli', () => {
   })
 })
 
+describe('runCli: "scoutling -" reads the question from stdin', () => {
+  it('runs the question read from an injected readStdin, trimming trailing whitespace', async () => {
+    const io = captureIO()
+    let requestBody = ''
+
+    const exitCode = await runCli({
+      argv: ['-', '--model', 'a-model', '--path', fixtureScopeRoot],
+      readStdin: async () => 'What does resolvePath do?\n\n  ',
+      fetch: (async (_url: string | URL | Request, init: RequestInit = {}) => {
+        requestBody = (init.body as string) ?? requestBody
+        return textCompletionResponse('The value is set (a.txt:1) at startup.')
+      }) as unknown as typeof fetch,
+      writeStdout: io.writeStdout,
+      writeStderr: io.writeStderr,
+    })
+
+    expect(exitCode).toBe(0)
+    expect(io.stdout.join('')).toContain('The value is set')
+    // Trailing whitespace (including the newline `echo` appends) must be
+    // gone; leading formatting is left alone, so this also proves the
+    // question text actually reached the model rather than being dropped.
+    expect(requestBody).toContain('What does resolvePath do?')
+    expect(requestBody).not.toContain('What does resolvePath do?\\n\\n')
+  })
+
+  it('empty stdin is BAD_ARGS (2), not an empty run', async () => {
+    const io = captureIO()
+    const exitCode = await runCli({
+      argv: ['-', '--model', 'a-model'],
+      readStdin: async () => '',
+      writeStdout: io.writeStdout,
+      writeStderr: io.writeStderr,
+    })
+
+    expect(exitCode).toBe(2)
+    const error = JSON.parse(io.stderr.join(''))
+    expect(error.error).toBe('BAD_ARGS')
+  })
+
+  it('whitespace-only stdin is BAD_ARGS (2)', async () => {
+    const io = captureIO()
+    const exitCode = await runCli({
+      argv: ['-', '--model', 'a-model'],
+      readStdin: async () => '   \n\t  \n',
+      writeStdout: io.writeStdout,
+      writeStderr: io.writeStderr,
+    })
+
+    expect(exitCode).toBe(2)
+    const error = JSON.parse(io.stderr.join(''))
+    expect(error.error).toBe('BAD_ARGS')
+  })
+})
+
+describe('runCli: models/doctor subcommand dispatch', () => {
+  it('"scoutling models" dispatches to the models subcommand, never requiring --model', async () => {
+    const io = captureIO()
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify({ data: [{ id: 'a-model' }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })) as unknown as typeof fetch
+
+    const exitCode = await runCli({
+      argv: ['models'],
+      fetch: fetchImpl,
+      writeStdout: io.writeStdout,
+      writeStderr: io.writeStderr,
+    })
+
+    expect(exitCode).toBe(0)
+    expect(io.stdout.join('')).toBe('a-model\n')
+    expect(io.stderr.join('')).not.toContain('--model is required')
+  })
+
+  it('"scoutling doctor" dispatches to the doctor subcommand, never requiring --model', async () => {
+    const io = captureIO()
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify({ data: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })) as unknown as typeof fetch
+
+    const exitCode = await runCli({
+      argv: ['doctor'],
+      fetch: fetchImpl,
+      writeStdout: io.writeStdout,
+      writeStderr: io.writeStderr,
+    })
+
+    expect(io.stderr.join('')).not.toContain('--model is required')
+    expect(io.stdout.join('')).toContain('config:')
+    expect(typeof exitCode).toBe('number')
+  })
+
+  it('a question whose text is not exactly "models" or "doctor" still runs as a normal question (no regression)', async () => {
+    const io = captureIO()
+    const fetchImpl = (async () => textCompletionResponse('Answer text.')) as unknown as typeof fetch
+
+    const exitCode = await runCli({
+      argv: ['list all the models in this repo', '--model', 'a-model', '--path', fixtureScopeRoot],
+      fetch: fetchImpl,
+      writeStdout: io.writeStdout,
+      writeStderr: io.writeStderr,
+    })
+
+    expect(exitCode).toBe(0)
+    expect(io.stdout.join('')).toContain('Answer text.')
+  })
+
+  it('a single-word question that is exactly "models" is dispatched as the subcommand (documented casualty)', async () => {
+    const io = captureIO()
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify({ data: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })) as unknown as typeof fetch
+
+    const exitCode = await runCli({
+      argv: ['models', '--model', 'a-model'],
+      fetch: fetchImpl,
+      writeStdout: io.writeStdout,
+      writeStderr: io.writeStderr,
+    })
+
+    // The models subcommand does not accept --model, so this is BAD_ARGS —
+    // proving dispatch happened rather than the string "models" running as
+    // a question (which would have accepted --model just fine).
+    expect(exitCode).toBe(2)
+    const error = JSON.parse(io.stderr.join(''))
+    expect(error.error).toBe('BAD_ARGS')
+    expect(error.message).toContain('--model')
+  })
+})
+
 describe('direct-entry detection', () => {
   it('recognizes the CLI being run from a path containing a space', () => {
     const path = '/tmp/my scoutling/dist/cli.js'

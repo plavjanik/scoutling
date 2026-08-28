@@ -54,7 +54,29 @@ describe('formatAnswerText', () => {
 
     expect(formatAnswerText(result)).toBe('No relevant files.\nSources: none cited')
   })
+  it('says why there is no answer when an exhausted run produced no text', () => {
+    // A blank line reads as "it worked and had nothing to say". Observed for
+    // real on a --budget quick run that spent all four steps calling tools.
+    const text = formatAnswerText(
+      buildResult({ answer: '', exhausted: true, citations: emptyCitations() }),
+    )
+    expect(text.split('\n')[0]).toContain('budget')
+    expect(text).not.toMatch(/^\n/)
+    expect(text).toContain('Sources: none cited')
+  })
+
+  it('distinguishes an empty answer that was not caused by a budget', () => {
+    const text = formatAnswerText(
+      buildResult({ answer: '   ', exhausted: false, citations: emptyCitations() }),
+    )
+    expect(text.split('\n')[0]).toBe('(no answer: the model returned no text)')
+  })
 })
+
+/** The citation report of an answer that cited nothing, since there was no answer to cite from. */
+function emptyCitations(): RunResult['citations'] {
+  return { sources: [], verifiedCount: 0, unverifiedCount: 0, summaryLine: 'Sources: none cited' }
+}
 
 describe('formatAnswerJson', () => {
   it('emits exactly the documented key set, pretty-printed with a trailing newline', () => {

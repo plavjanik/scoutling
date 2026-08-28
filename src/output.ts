@@ -14,7 +14,25 @@ export function isOutputFormat(value: unknown): value is OutputFormat {
  * than re-deriving it from `result.citations.sources`.
  */
 export function formatAnswerText(result: RunResult): string {
-  return `${result.answer}\n${result.citations.summaryLine}`
+  return `${answerOrEmptyState(result)}\n${result.citations.summaryLine}`
+}
+
+/**
+ * A run can finish with no text at all: the model spends every step calling
+ * tools and the step cap cuts it off before it ever writes a word. Printing
+ * `result.answer` verbatim then emits a blank line, which reads as "it
+ * worked and had nothing to say" rather than "it ran out of room" — the
+ * definitive-empty-state rule (AXI principle 5) exists for exactly this.
+ *
+ * Only text mode needs it. `--format json` keeps `answer: ""`, which a
+ * parent agent can test for directly and which `exhausted` already explains.
+ */
+function answerOrEmptyState(result: RunResult): string {
+  if (result.answer.trim().length > 0) return result.answer
+
+  return result.exhausted
+    ? '(no answer: the run hit a step or tool-output budget before the model wrote one)'
+    : '(no answer: the model returned no text)'
 }
 
 /**
