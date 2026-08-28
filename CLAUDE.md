@@ -22,7 +22,7 @@ Shipping today: `config.ts` (six layers + provenance), `provider.ts` (+ `listMod
 tools (`tools/read-file.ts`, `tools/list-dir.ts`, `tools/grep.ts`, assembled by `tools/index.ts`),
 `prompt.ts`, `loop.ts` (`runScoutling`), `budget.ts`, `citations.ts`, `toon.ts`, `output.ts`,
 `commands.ts`, `run-setup.ts`, `classify-run-error.ts`, `cli.ts` (`runCli`, injectable I/O),
-`script/smoke.ts`, and `eval/run-eval.ts` (`pnpm eval`). **382 hermetic tests, 21 files.**
+`script/smoke.ts`, and `eval/run-eval.ts` (`pnpm eval`). **390 hermetic tests, 21 files.**
 `pnpm smoke` passes live on `qwen/qwen3-coder-next` **on the shipped defaults** — it no longer
 needs `--budget deep` or `--timeout-ms`.
 
@@ -62,10 +62,16 @@ Three things to carry into the re-tune, none of them guesses any more:
   scoutling's own smoke question — 6 steps, 45 KB, well-targeted — which does not resemble a
   question that has to *derive* a value across a large repo (dedupe 145 `WATCHLIST` entries,
   subtract 6 `coverage:"quotes"` ones). That class is where `normal` fails.
-- **A timeout still costs the whole cell.** `form4-ticker-count` run 2 hit the 600 s wall and
-  returned nothing at all, because `generateText` rejects on abort and every completed step is
-  discarded (DESIGN.md §15, deferred from Phase 4). It is no longer theoretical: it has now eaten
-  a real eval run.
+- **A timeout still costs the whole cell — fixed 2026-08-28.** `form4-ticker-count` run 2 hit the
+  600 s wall and returned nothing at all, because `generateText` rejects on abort and every
+  completed step used to be discarded (DESIGN.md §15). Fixed: `loop.ts` now accumulates each
+  step via `onStepFinish`, and a timeout with at least one completed step returns a normal
+  `RunResult` (`timedOut: true`, `exhaustedBy` including `'timeout'`) instead of throwing, exit 1;
+  a zero-step timeout still throws `ScoutlingError('TIMEOUT')`, exit 4, unchanged. `exhaustedBy`
+  (`'steps'`/`'bytes'`/`'timeout'`, any subset) also now reports which cap(s) actually fired,
+  everywhere `exhausted` used to be a single boolean — `RunResult`, `--format json`, the
+  `BUDGET_EXHAUSTED` warning's message, and both eval summary tables (a new per-run column, a new
+  per-model per-cap count).
 
 **And `auto: pass` is not a verdict, demonstrated:** `form4-ticker-count` scored `auto: pass` on
 both completed runs with **zero verified citations** — the answer contained the right numbers and

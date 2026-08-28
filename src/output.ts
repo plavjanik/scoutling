@@ -31,7 +31,7 @@ function answerOrEmptyState(result: RunResult): string {
   if (result.answer.trim().length > 0) return result.answer
 
   return result.exhausted
-    ? '(no answer: the run hit a step or tool-output budget before the model wrote one)'
+    ? '(no answer: the run hit a step, tool-output, or timeout budget before the model wrote one)'
     : '(no answer: the model returned no text)'
 }
 
@@ -55,13 +55,14 @@ export function formatAnswerJson(result: RunResult, model: string): string {
     stepsUsed: result.stepsUsed,
     toolCalls: result.toolCalls,
     exhausted: result.exhausted,
-    // Always false today: a timeout is an error path (ScoutlingError, exit 4)
-    // that throws out of runScoutling before a RunResult ever exists, so this
-    // branch can never observe `true`. The key stays in the shape anyway —
-    // DESIGN.md §9 documents it, and a parent agent's JSON parsing should not
-    // have to special-case its absence pending whatever later slice (if any)
-    // makes a timeout produce a partial answer instead of an error.
-    timedOut: false,
+    exhaustedBy: result.exhaustedBy,
+    // True only when the wall-clock timeout fired after at least one step
+    // had already completed: `runScoutling` salvages what it can instead of
+    // throwing in that case (DESIGN.md §15), so a `RunResult` can now
+    // genuinely carry `timedOut: true`. A zero-step timeout still throws
+    // `ScoutlingError('TIMEOUT')` before a `RunResult` ever exists, so this
+    // key is `false` on every value that reaches here from that path.
+    timedOut: result.timedOut,
     wallMs: result.wallMs,
     toolOutputBytes: result.toolOutputBytes,
     toolCallErrors: result.toolCallErrors,

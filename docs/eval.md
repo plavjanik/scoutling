@@ -179,6 +179,18 @@ so the filename is valid on Windows too):
   mean steps/bytes/wallMs, error count, auto-pass rate, exhausted count). This second table is
   what actually answers "which model" — the per-run table is for digging into a specific failure.
 
+  Both tables also break the `exhausted` count down by **which cap fired** (Phase 6 follow-up,
+  2026-08-28) — `RunResult.exhaustedBy` says `"steps"`, `"bytes"`, `"timeout"`, any subset, per
+  run. The per-run table renders it as one cell right after `exhausted` (`steps+bytes`, `timeout`,
+  or empty when nothing fired); the per-model table adds three count columns, `exhausted: steps` /
+  `exhausted: bytes` / `exhausted: timeout` — how many of that model's runs hit each cap, with a
+  run counted in more than one column when more than one cap fired on it. This exists because a
+  single `exhausted: true` is not tunable: Phase 6's first eval run had a question that exhausted
+  on bytes twice and on steps once across different runs, and until this landed the only way to
+  tell which cap actually bound was opening every run's JSON by hand and comparing. The per-model
+  breakdown is the number the §7 preset re-tune reads — "raise `maxSteps` or `maxToolOutputBytes`"
+  is a different fix depending on which column is nonzero for a given model.
+
 `eval/results/` is gitignored; nothing there is meant to be committed.
 
 ## How to grade

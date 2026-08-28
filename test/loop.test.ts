@@ -207,6 +207,7 @@ describe('runScoutling', () => {
 
     expect(result.stepsUsed).toBe(1)
     expect(result.exhausted).toBe(false)
+    expect(result.exhaustedBy).toEqual([])
     expect(result.toolCalls).toEqual({ read_file: 0, list_dir: 0, grep: 0 })
   })
 
@@ -236,7 +237,42 @@ describe('runScoutling', () => {
 
     expect(result.stepsUsed).toBe(3)
     expect(result.exhausted).toBe(true)
+    expect(result.exhaustedBy).toEqual(['steps'])
     expect(typeof result.answer).toBe('string')
+  })
+
+  it('exhaustedBy contains both steps and bytes when a run hits both caps at once', async () => {
+    // Always calls a tool and never stops on its own (finishReason stays
+    // 'tool-calls' at cutoff), so maxSteps fires; maxToolOutputBytes is tiny
+    // enough that the very first real call already exhausts it. Both
+    // conditions are independent (loop.ts checks them separately), so this
+    // proves neither one silently masks the other.
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => ({
+        content: [
+          {
+            type: 'tool-call' as const,
+            toolCallId: `call-${Math.random()}`,
+            toolName: 'read_file',
+            input: JSON.stringify({ path: 'a.txt' }),
+          },
+        ],
+        finishReason: { unified: 'tool-calls' as const, raw: undefined },
+        usage: usage(),
+        warnings: [],
+      }),
+    })
+
+    const result = await runScoutling({
+      question: 'Keep reading forever.',
+      scopeRoot,
+      model,
+      budget: { maxSteps: 3, maxToolOutputBytes: 5 },
+    })
+
+    expect(result.stepsUsed).toBe(3)
+    expect(result.exhausted).toBe(true)
+    expect([...result.exhaustedBy].sort()).toEqual(['bytes', 'steps'])
   })
 
   it('defaults maxSteps to the normal preset when not given', async () => {
@@ -425,6 +461,9 @@ describe('runScoutling', () => {
     // maxToolOutputBytes: 5 is far smaller than a.txt's JSON-serialized
     // read_file result, so the very first real call already crosses it.
     expect(result.exhausted).toBe(true)
+    // The model stopped on its own (finishReason 'stop') after the budget
+    // refusal, so 'steps' must not appear here — only 'bytes' actually fired.
+    expect(result.exhaustedBy).toEqual(['bytes'])
     expect(result.toolOutputBytes).toBeGreaterThan(0)
     expect(result.stepsUsed).toBe(3)
 
@@ -432,6 +471,73 @@ describe('runScoutling', () => {
     // exhausted, so the model must have been fed the refusal shape, not a
     // real second read.
     expect(JSON.stringify(thirdCallPrompt)).toContain('BUDGET_EXHAUSTED')
+  })
+
+  it('a timeout that fires after steps completed salvages a RunResult instead of throwing', async () => {
+    // Steps 1 and 2 resolve immediately (no real sleep — they're plain
+    // read_file calls against the small fixture scope); step 3 hangs and
+    // only reacts to the abortSignal, exactly like the zero-step TIMEOUT
+    // tests below. This proves runScoutling preserves what already
+    // completed rather than discarding it when generateText rejects.
+    let call = 0
+    const model = new MockLanguageModelV4({
+      doGenerate: async (opts) => {
+        call += 1
+        if (call === 1) {
+          return {
+            content: [
+              {
+                type: 'tool-call' as const,
+                toolCallId: 'call-1',
+                toolName: 'read_file',
+                input: JSON.stringify({ path: 'a.txt' }),
+              },
+            ],
+            finishReason: { unified: 'tool-calls' as const, raw: undefined },
+            usage: usage(),
+            warnings: [],
+          }
+        }
+        if (call === 2) {
+          return {
+            content: [
+              { type: 'text' as const, text: 'Partial reasoning before continuing.' },
+              {
+                type: 'tool-call' as const,
+                toolCallId: 'call-2',
+                toolName: 'read_file',
+                input: JSON.stringify({ path: 'sub/nested.txt' }),
+              },
+            ],
+            finishReason: { unified: 'tool-calls' as const, raw: undefined },
+            usage: usage(),
+            warnings: [],
+          }
+        }
+        // Third call onward: never settles on its own.
+        await new Promise((_resolve, reject) => {
+          opts.abortSignal?.addEventListener('abort', () => {
+            reject(Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }))
+          })
+        })
+        throw new Error('unreachable: the promise above never resolves')
+      },
+    })
+
+    const result = await runScoutling({
+      question: 'Investigate slowly.',
+      scopeRoot,
+      model,
+      budget: { maxSteps: 10, timeoutMs: 40 },
+    })
+
+    expect(result.timedOut).toBe(true)
+    expect(result.exhaustedBy).toContain('timeout')
+    expect(result.exhausted).toBe(true)
+    // Exactly the steps that actually completed before the hang — not
+    // merely "greater than zero".
+    expect(result.stepsUsed).toBe(2)
+    expect(result.answer).toBe('Partial reasoning before continuing.')
   })
 
   it('a run that exceeds timeoutMs throws a ScoutlingError with code TIMEOUT', async () => {

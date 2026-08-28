@@ -7,7 +7,7 @@ import { runDoctorCommand, runModelsCommand } from './commands.js'
 import { loadConfig } from './config.js'
 import { ScoutlingError } from './errors.js'
 import { resolveScopeRoot } from './guardrails.js'
-import { runScoutling, type StepSummary } from './loop.js'
+import { runScoutling, type RunResult, type StepSummary } from './loop.js'
 import { formatAnswerJson, formatAnswerText, isOutputFormat, type OutputFormat } from './output.js'
 import { listModels } from './provider.js'
 import { buildRunInputs, type RunInputs } from './run-setup.js'
@@ -202,6 +202,27 @@ export function parseArgs(argv: string[]): ParsedArgs {
 function formatStepLog(step: StepSummary): string {
   const calls = step.toolCalls.map((call) => `${call.name}(${JSON.stringify(call.args)})`).join(', ')
   return `[step ${step.index}] ${calls || '(answer)'} — ${step.bytes} bytes`
+}
+
+/** `steps, bytes` / `timeout` / etc. — a human-readable list of which cap(s) fired, for the BUDGET_EXHAUSTED warning's `message`. */
+function namedExhaustedCaps(exhaustedBy: RunResult['exhaustedBy']): string {
+  return exhaustedBy.join(', ')
+}
+
+/**
+ * The BUDGET_EXHAUSTED warning's `hint`, tailored to which cap(s) actually
+ * fired: `--max-tool-bytes` only helps when bytes ran out, `--max-steps`
+ * only when steps did, `--timeout-ms` only for a timeout. When more than one
+ * fired, all the relevant flags are named in one sentence.
+ */
+function exhaustedCapsHint(exhaustedBy: RunResult['exhaustedBy']): string {
+  const flags: string[] = []
+  if (exhaustedBy.includes('bytes')) flags.push('--max-tool-bytes')
+  if (exhaustedBy.includes('steps')) flags.push('--max-steps')
+  if (exhaustedBy.includes('timeout')) flags.push('--timeout-ms')
+
+  if (flags.length === 0) return 'Narrow --path or ask a more specific question.'
+  return `Try raising ${flags.join(' and/or ')}, narrow --path, or ask a more specific question.`
 }
 
 /** Everything runCli needs from the outside world, all injectable for hermetic tests. */
@@ -402,8 +423,8 @@ export async function runCli(io: CliIO): Promise<number> {
       writeStderr(
         `${JSON.stringify({
           warning: 'BUDGET_EXHAUSTED',
-          message: 'The run stopped before the model finished: a step or tool-output budget ran out.',
-          hint: 'Narrow --path or ask a more specific question.',
+          message: `The run stopped before the model finished: ${namedExhaustedCaps(result.exhaustedBy)} exhausted.`,
+          hint: exhaustedCapsHint(result.exhaustedBy),
         })}\n`,
       )
     }

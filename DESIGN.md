@@ -336,14 +336,23 @@ scoutling init <claude-code|codex|opencode|cursor>   # v1.1 — writes the integ
 ```
 
 - **`text`** (default): the answer, prose, stdout only. **`json`**: `{answer, sources, model,
-  usage, stepsUsed, toolCalls:{read_file,list_dir,grep}, exhausted, timedOut, wallMs,
-  toolOutputBytes, toolCallErrors}`. The last two postdate this list (Phase 4 and Phase 5
-  additions respectively — see `output.ts`'s `formatAnswerJson`) but ship in every run's JSON.
+  usage, stepsUsed, toolCalls:{read_file,list_dir,grep}, exhausted, exhaustedBy, timedOut, wallMs,
+  toolOutputBytes, toolCallErrors}`. `toolOutputBytes`/`toolCallErrors` postdate this list (Phase 4
+  and Phase 5 additions respectively — see `output.ts`'s `formatAnswerJson`) but ship in every
+  run's JSON, as does `exhaustedBy` (Phase 6 follow-up, 2026-08-28): an array of which cap(s) cut
+  the run short — `"steps"`, `"bytes"`, `"timeout"`, any subset, in no particular order — since
+  more than one can fire on a single run. `exhausted` stays the boolean summary
+  (`exhaustedBy.length > 0`).
 - `--verbose`: per-step log to stderr (tool name, args summary, bytes returned).
 - **Errors** are one-line JSON on stderr with a code, and map to exit codes:
   `0` ok · `1` answered but budget exhausted / no verified citations under `--require-citations`
   · `2` `BAD_ARGS` · `3` `PROVIDER_UNREACHABLE` · `4` `TIMEOUT` · `5` `PATH_NOT_FOUND` ·
-  `10` `INTERNAL`.
+  `10` `INTERNAL`. A timeout splits across two of these depending on whether any step completed
+  before the wall clock fired: a **partial** timeout (at least one step done) returns a normal
+  `RunResult` with `timedOut: true` and `"timeout"` in `exhaustedBy`, same tier as any other
+  exhausted-budget answer → exit `1`. A **zero-step** timeout (nothing ever completed) still
+  throws `ScoutlingError('TIMEOUT')` → exit `4`, unchanged — there is nothing to salvage, so it
+  stays a hard failure rather than an answer.
 - Missing `--model` → `BAD_ARGS` whose message includes the live `GET /models` list, so the fix
   is one retry away.
 - No interactive prompts, ever (AXI principle 6); `NO_COLOR` respected.
@@ -533,13 +542,20 @@ delegation rule; review, eval grading and the README claims stay in the main loo
 
 > **Deferred from Phase 4** (found by running the tool; triaged 2026-08-28 as "later"):
 >
-> - **A timeout throws away every step the run completed.** `generateText` rejects on abort, so a
->   run that dies at the wall-clock cap loses all of its tool calls and returns nothing — the
->   worst possible outcome for the slowest possible run. It is also why `timedOut` in the
->   `--format json` object (§9) is a permanently-`false` dead field. Accumulating steps through
->   `onStepFinish` and synthesising "here is what I found before I ran out of time" would make
->   the field real and turn a total loss into a partial answer. Wants a decision about whether
->   that exits 4 (an error, as today) or 1 (answered-but-degraded, like budget exhaustion).
+> - **A timeout throws away every step the run completed — fixed 2026-08-28.** `generateText`
+>   rejects on abort, so a run that died at the wall-clock cap used to lose all of its tool calls
+>   and return nothing — the worst possible outcome for the slowest possible run, and no longer
+>   theoretical once it ate a real Phase 6 eval cell (`form4-ticker-count` run 2, 600 s, zero
+>   result). **The decision taken:** `loop.ts` now accumulates each `StepResult` through the
+>   `onStepFinish` callback it already had, and on a timeout checks whether anything completed. If
+>   at least one step did, `runScoutling` returns a normal `RunResult` built from those steps
+>   (`timedOut: true`, `exhausted: true`, `"timeout"` in `exhaustedBy`) instead of throwing — exit
+>   `1`, the same tier as any other exhausted-budget answer. If nothing completed, it still throws
+>   `ScoutlingError('TIMEOUT')` — exit `4`, unchanged. The two cases are genuinely different things
+>   to tell a caller: "here is partial evidence" versus "the provider never answered" — so the
+>   status quo behaviour stays for the case with nothing to salvage, and only the salvageable case
+>   changes. `timedOut` in the `--format json` object (§9) is real now, not a permanently-`false`
+>   field.
 > - **The citation extractor still admits a `word:digits` token** — "Figure 2:5", "Step 3:1".
 >   Requiring a line number (§8) removed every false positive observed so far, but not this
 >   class. Low frequency and low harm (it lands as one unverifiable source), so it is worth

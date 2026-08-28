@@ -220,6 +220,8 @@ export interface EvalRunRecord {
   toolCalls: { read_file: number; list_dir: number; grep: number }
   toolCallErrors: number
   exhausted: boolean
+  /** Which cap(s) fired, verbatim from `RunResult.exhaustedBy`; `[]` for a failed run (nothing to break down) — Phase 6's preset re-tune reads this per-run and, aggregated, per-model. */
+  exhaustedBy: RunResult['exhaustedBy']
   wallMs: number
   toolOutputBytes: number
   usage: { inputTokens: number | undefined; outputTokens: number | undefined }
@@ -272,6 +274,7 @@ function buildOkRecord(
     toolCalls: result.toolCalls,
     toolCallErrors: result.toolCallErrors,
     exhausted: result.exhausted,
+    exhaustedBy: result.exhaustedBy,
     wallMs: result.wallMs,
     toolOutputBytes: result.toolOutputBytes,
     usage: result.usage,
@@ -310,6 +313,7 @@ function buildFailedRecord(
     toolCalls: { read_file: 0, list_dir: 0, grep: 0 },
     toolCallErrors: 0,
     exhausted: false,
+    exhaustedBy: [],
     wallMs: 0,
     toolOutputBytes: 0,
     usage: { inputTokens: undefined, outputTokens: undefined },
@@ -621,19 +625,24 @@ function mean(values: number[]): string {
   return (values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(1)
 }
 
+/** `steps+bytes` / `timeout` / `''` (nothing fired) — the per-run rendering of which cap(s) cut a run short. */
+function formatExhaustedBy(exhaustedBy: EvalRunRecord['exhaustedBy']): string {
+  return exhaustedBy.join('+')
+}
+
 function buildRunRow(model: string, record: EvalRunRecord): string {
   if (!record.ok) {
     const code = record.error?.code ?? 'ERROR'
     // Failed runs show their error code in place of the numbers (Part B4) —
     // every numeric column becomes the same code, so the row stays the same
     // width as a successful one and the failure is impossible to miss.
-    return `| ${record.questionId} | ${model} | ${record.runIndex} | ${record.temperature} | ${code} | ${code} | ${code} | ${code} | ${code} | ${code} | ${code} | ${code} | ${code} | ${record.autoGrade ?? ''} | |`
+    return `| ${record.questionId} | ${model} | ${record.runIndex} | ${record.temperature} | ${code} | ${code} | ${code} | ${code} | ${code} | ${code} | ${code} | ${code} | ${code} | ${code} | ${record.autoGrade ?? ''} | |`
   }
   return (
     `| ${record.questionId} | ${model} | ${record.runIndex} | ${record.temperature} | ${record.stepsUsed} | ` +
     `${formatToolCalls(record.toolCalls)} | ${record.toolCallErrors} | ${record.toolOutputBytes} | ` +
     `${record.usage.inputTokens ?? ''} | ${record.usage.outputTokens ?? ''} | ${record.wallMs} | ` +
-    `${record.exhausted} | ${record.verifiedSources} | ${record.autoGrade ?? ''} | |`
+    `${record.exhausted} | ${formatExhaustedBy(record.exhaustedBy)} | ${record.verifiedSources} | ${record.autoGrade ?? ''} | |`
   )
 }
 
@@ -643,11 +652,19 @@ function buildModelSummaryRow(result: EvalModelResultFile): string {
   const autoGraded = result.runs.filter((run) => run.autoGrade !== null)
   const autoPassed = autoGraded.filter((run) => run.autoGrade === 'pass')
   const exhaustedCount = ok.filter((run) => run.exhausted).length
+  // Per-cap counts, not just the combined `exhausted` total (DESIGN.md §15,
+  // Phase 6 follow-up): this is the table the preset re-tune actually reads
+  // — "which cap binds for this model" is unanswerable from `exhausted`
+  // alone, and a run can count in more than one column.
+  const exhaustedStepsCount = ok.filter((run) => run.exhaustedBy.includes('steps')).length
+  const exhaustedBytesCount = ok.filter((run) => run.exhaustedBy.includes('bytes')).length
+  const exhaustedTimeoutCount = ok.filter((run) => run.exhaustedBy.includes('timeout')).length
 
   return (
     `| ${result.model} | ${result.runs.length} | ${errors} | ${autoPassed.length}/${autoGraded.length} | ` +
     `${mean(ok.map((run) => run.stepsUsed))} | ${mean(ok.map((run) => run.toolOutputBytes))} | ` +
-    `${mean(ok.map((run) => run.wallMs))} | ${exhaustedCount} |`
+    `${mean(ok.map((run) => run.wallMs))} | ${exhaustedCount} | ` +
+    `${exhaustedStepsCount} | ${exhaustedBytesCount} | ${exhaustedTimeoutCount} |`
   )
 }
 
@@ -660,9 +677,9 @@ function buildSummaryMarkdown(
 
   lines.push('## Per-run results', '')
   lines.push(
-    '| question | model | run | temp | steps | tools | tool errs | bytes | in tok | out tok | wallMs | exhausted | verified | auto | correct? |',
+    '| question | model | run | temp | steps | tools | tool errs | bytes | in tok | out tok | wallMs | exhausted | exhausted by | verified | auto | correct? |',
   )
-  lines.push('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|')
+  lines.push('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|')
   for (const result of modelResults) {
     for (const run of result.runs) {
       lines.push(buildRunRow(result.model, run))
@@ -670,8 +687,10 @@ function buildSummaryMarkdown(
   }
 
   lines.push('', '## Per-model summary', '')
-  lines.push('| model | runs | errors | auto pass/total | mean steps | mean bytes | mean wallMs | exhausted |')
-  lines.push('|---|---|---|---|---|---|---|---|')
+  lines.push(
+    '| model | runs | errors | auto pass/total | mean steps | mean bytes | mean wallMs | exhausted | exhausted: steps | exhausted: bytes | exhausted: timeout |',
+  )
+  lines.push('|---|---|---|---|---|---|---|---|---|---|---|')
   for (const result of modelResults) {
     lines.push(buildModelSummaryRow(result))
   }

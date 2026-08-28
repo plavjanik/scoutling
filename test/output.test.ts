@@ -10,6 +10,8 @@ function buildResult(overrides: Partial<RunResult> = {}): RunResult {
     stepsUsed: 2,
     toolCalls: { read_file: 1, list_dir: 0, grep: 0 },
     exhausted: false,
+    exhaustedBy: [],
+    timedOut: false,
     usage: { inputTokens: 42, outputTokens: 17 },
     wallMs: 1234,
     toolOutputBytes: 99,
@@ -97,6 +99,7 @@ describe('formatAnswerJson', () => {
         'stepsUsed',
         'toolCalls',
         'exhausted',
+        'exhaustedBy',
         'timedOut',
         'wallMs',
         'toolOutputBytes',
@@ -115,17 +118,26 @@ describe('formatAnswerJson', () => {
     expect(parsed.stepsUsed).toBe(result.stepsUsed)
     expect(parsed.toolCalls).toEqual(result.toolCalls)
     expect(parsed.exhausted).toBe(result.exhausted)
+    expect(parsed.exhaustedBy).toEqual(result.exhaustedBy)
     expect(parsed.wallMs).toBe(result.wallMs)
     expect(parsed.toolOutputBytes).toBe(result.toolOutputBytes)
     expect(parsed.toolCallErrors).toBe(result.toolCallErrors)
     expect(parsed.usage).toEqual(result.usage)
   })
 
-  it('timedOut is always false — a timeout is an error path that never produces a RunResult', () => {
-    const result = buildResult({ exhausted: true })
+  it('timedOut is false on a normal (non-timeout) run', () => {
+    const result = buildResult({ exhausted: true, exhaustedBy: ['steps'] })
     const parsed = JSON.parse(formatAnswerJson(result, 'my-model'))
 
     expect(parsed.timedOut).toBe(false)
+  })
+
+  it('carries exhaustedBy and a true timedOut through for a salvaged-timeout RunResult', () => {
+    const result = buildResult({ exhausted: true, exhaustedBy: ['timeout'], timedOut: true })
+    const parsed = JSON.parse(formatAnswerJson(result, 'my-model'))
+
+    expect(parsed.exhaustedBy).toEqual(['timeout'])
+    expect(parsed.timedOut).toBe(true)
   })
 
   it('does not include a separate "Sources:" text line — sources live only in the sources key', () => {

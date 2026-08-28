@@ -450,6 +450,7 @@ describe('runCli', () => {
       [
         'answer',
         'exhausted',
+        'exhaustedBy',
         'model',
         'sources',
         'stepsUsed',
@@ -583,6 +584,81 @@ describe('runCli', () => {
     const warnings = io.stderr.map((line) => JSON.parse(line))
     expect(warnings).toContainEqual(expect.objectContaining({ warning: 'BUDGET_EXHAUSTED' }))
     expect(warnings).toContainEqual(expect.objectContaining({ warning: 'NO_VERIFIED_CITATIONS' }))
+  })
+
+  it('a zero-step timeout (fetch hangs forever) exits 4 with a TIMEOUT error on stderr', async () => {
+    const io = captureIO()
+    // Never resolves on its own — reacts only to the abort signal the AI SDK
+    // forwards as `init.signal` (verified against the installed
+    // @ai-sdk/provider-utils@5.0.32: `init = { signal: abortSignal, ... }`),
+    // exactly mirroring how a real provider's own fetch would behave.
+    const fetchImpl = ((_url: string | URL | Request, init: RequestInit = {}) =>
+      new Promise<Response>((_resolve, reject) => {
+        const signal = init.signal
+        if (signal?.aborted) {
+          reject(new DOMException('The operation was aborted.', 'AbortError'))
+          return
+        }
+        signal?.addEventListener('abort', () => {
+          reject(new DOMException('The operation was aborted.', 'AbortError'))
+        })
+      })) as unknown as typeof fetch
+
+    const exitCode = await runCli({
+      argv: ['a question', '--model', 'a-model', '--path', fixtureScopeRoot, '--timeout-ms', '20'],
+      fetch: fetchImpl,
+      writeStdout: io.writeStdout,
+      writeStderr: io.writeStderr,
+    })
+
+    expect(exitCode).toBe(4)
+    const error = JSON.parse(io.stderr.join(''))
+    expect(error.error).toBe('TIMEOUT')
+  })
+
+  it('a partial timeout (one step completes, then fetch hangs) exits 1, still prints a usable answer/empty-state, and warns BUDGET_EXHAUSTED naming timeout', async () => {
+    const io = captureIO()
+    let call = 0
+    const fetchImpl = ((_url: string | URL | Request, init: RequestInit = {}) => {
+      call += 1
+      if (call === 1) {
+        // First round-trip completes normally: one tool-call step.
+        return Promise.resolve(toolCallCompletionResponse())
+      }
+      // Every call from here on hangs until the abort signal fires.
+      return new Promise<Response>((_resolve, reject) => {
+        const signal = init.signal
+        if (signal?.aborted) {
+          reject(new DOMException('The operation was aborted.', 'AbortError'))
+          return
+        }
+        signal?.addEventListener('abort', () => {
+          reject(new DOMException('The operation was aborted.', 'AbortError'))
+        })
+      })
+    }) as unknown as typeof fetch
+
+    const exitCode = await runCli({
+      argv: ['a question', '--model', 'a-model', '--path', fixtureScopeRoot, '--timeout-ms', '50'],
+      fetch: fetchImpl,
+      writeStdout: io.writeStdout,
+      writeStderr: io.writeStderr,
+    })
+
+    expect(exitCode).toBe(1)
+    expect(call).toBeGreaterThanOrEqual(2)
+
+    // The run salvaged one completed step (a tool call with no text of its
+    // own), so text mode falls into the definitive-empty-state branch rather
+    // than printing a blank line.
+    const stdout = io.stdout.join('')
+    expect(stdout.length).toBeGreaterThan(0)
+    expect(stdout).toContain('no answer')
+
+    const warnings = io.stderr.map((line) => JSON.parse(line))
+    const budgetWarning = warnings.find((warning) => warning.warning === 'BUDGET_EXHAUSTED')
+    expect(budgetWarning).toBeDefined()
+    expect(budgetWarning.message).toContain('timeout')
   })
 })
 

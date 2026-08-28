@@ -40,6 +40,8 @@ function fakeRunResult(overrides: Partial<RunResult> = {}): RunResult {
     stepsUsed: 2,
     toolCalls: { read_file: 1, list_dir: 0, grep: 0 },
     exhausted: false,
+    exhaustedBy: [],
+    timedOut: false,
     usage: { inputTokens: 10, outputTokens: 5 },
     wallMs: 42,
     toolOutputBytes: 100,
@@ -449,6 +451,88 @@ describe('runEval — output files', () => {
       // The row's last cell (correct?) is empty: the row ends "| |" (the auto
       // column's value, then an empty correct? cell, then the row-closing pipe).
       expect(runRow?.trim().endsWith('| |')).toBe(true)
+    })
+  })
+})
+
+describe('runEval — exhaustedBy', () => {
+  it('exhaustedBy reaches the written EvalRunRecord verbatim from the RunResult', async () => {
+    await withTempDir(async (dir) => {
+      const path = writeQuestionFile(dir, basicQuestionFile({ questions: [{ id: 'q1', question: 'A?' }] }))
+      const { io, files } = buildIo(
+        ['--models', 'model-a', '--questions', path, '--repo', fixtureRepo, '--temperatures', '0'],
+        {
+          runQuestion: async () => fakeRunResult({ exhausted: true, exhaustedBy: ['steps', 'bytes'] }),
+        },
+      )
+      const code = await runEval(io)
+      expect(code).toBe(0)
+
+      const modelFile = [...files.entries()].find(([filePath]) => filePath.endsWith('model-a.json'))
+      expect(modelFile).toBeDefined()
+      const parsed = JSON.parse(modelFile![1])
+      const q1 = parsed.runs.find((run: { questionId: string }) => run.questionId === 'q1')
+      expect(q1.exhaustedBy.sort()).toEqual(['bytes', 'steps'])
+    })
+  })
+
+  it("the per-run markdown table renders which cap(s) fired as e.g. 'steps+bytes'", async () => {
+    await withTempDir(async (dir) => {
+      const path = writeQuestionFile(dir, basicQuestionFile({ questions: [{ id: 'q1', question: 'A?' }] }))
+      const { io, files } = buildIo(
+        ['--models', 'model-a', '--questions', path, '--repo', fixtureRepo, '--temperatures', '0'],
+        {
+          runQuestion: async () => fakeRunResult({ exhausted: true, exhaustedBy: ['steps', 'bytes'] }),
+        },
+      )
+      const code = await runEval(io)
+      expect(code).toBe(0)
+
+      const summary = [...files.entries()].find(([filePath]) => filePath.endsWith('summary.md'))
+      expect(summary).toBeDefined()
+      const runRow = summary![1].split('\n').find((line) => line.startsWith('| q1 |'))
+      expect(runRow).toBeDefined()
+      // "exhausted" (true) immediately followed by the "exhausted by" column.
+      expect(runRow).toContain('| true | steps+bytes |')
+    })
+  })
+
+  it('the per-model summary table counts runs per cap correctly across a mix of exhaustedBy combinations', async () => {
+    await withTempDir(async (dir) => {
+      const path = writeQuestionFile(
+        dir,
+        basicQuestionFile({
+          questions: [
+            { id: 'q1', question: 'A?' },
+            { id: 'q2', question: 'B?' },
+          ],
+        }),
+      )
+      const { io, files } = buildIo(
+        ['--models', 'model-a', '--questions', path, '--repo', fixtureRepo, '--temperatures', '0'],
+        {
+          runQuestion: async (input) => {
+            if (input.question.id === 'q1') {
+              return fakeRunResult({ exhausted: true, exhaustedBy: ['steps'] })
+            }
+            // q2: both steps and bytes fired.
+            return fakeRunResult({ exhausted: true, exhaustedBy: ['steps', 'bytes'] })
+          },
+        },
+      )
+      const code = await runEval(io)
+      expect(code).toBe(0)
+
+      const summary = [...files.entries()].find(([filePath]) => filePath.endsWith('summary.md'))
+      expect(summary).toBeDefined()
+      const modelRow = summary![1].split('\n').find((line) => line.startsWith('| model-a |'))
+      expect(modelRow).toBeDefined()
+
+      const cells = modelRow!.split('|').map((cell) => cell.trim())
+      // | model | runs | errors | auto pass/total | mean steps | mean bytes | mean wallMs | exhausted | exhausted: steps | exhausted: bytes | exhausted: timeout |
+      expect(cells[9]).toBe('2') // both q1 and q2 hit steps
+      expect(cells[10]).toBe('1') // only q2 hit bytes
+      expect(cells[11]).toBe('0') // neither hit timeout
     })
   })
 })

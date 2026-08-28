@@ -1,4 +1,4 @@
-import { generateText, isStepCount, type LanguageModel } from 'ai'
+import { generateText, isStepCount, type LanguageModel, type StepResult } from 'ai'
 
 import { type Budget, ToolOutputBudget, resolveBudget, withToolOutputBudget } from './budget.js'
 import { type CitationReport, verifyCitations } from './citations.js'
@@ -39,9 +39,30 @@ export interface RunResult {
   toolCalls: { read_file: number; list_dir: number; grep: number }
   /**
    * True when the run was cut off by any cap: the step count (the model
-   * still wanted to call tools) or the tool-output byte budget.
+   * still wanted to call tools), the tool-output byte budget, or (Phase 6
+   * follow-up) the wall-clock timeout after at least one step completed.
+   * Equivalent to `exhaustedBy.length > 0` — kept as its own field because
+   * it is the one most callers actually branch on.
    */
   exhausted: boolean
+  /**
+   * Which cap(s) cut the run short, in no particular order; empty when it
+   * finished on its own terms. `exhausted` stays the boolean summary
+   * (`exhaustedBy.length > 0`). Both can fire on one run -- Phase 6 measured
+   * a question that exhausted on bytes twice and on steps once -- so this is
+   * a list, not an enum: reporting only the first would make the §7 presets
+   * untunable, which is the reason it exists.
+   */
+  exhaustedBy: Array<'steps' | 'bytes' | 'timeout'>
+  /**
+   * True only on the salvaged-timeout path: the wall-clock budget fired
+   * after at least one step had already completed, so `runScoutling`
+   * returns a normal `RunResult` (built from the steps that finished)
+   * instead of throwing. A timeout with zero completed steps still throws
+   * `ScoutlingError('TIMEOUT')` and never produces a `RunResult` at all, so
+   * this field is `false` on every value that exists.
+   */
+  timedOut: boolean
   usage: {
     inputTokens: number | undefined
     outputTokens: number | undefined
@@ -122,6 +143,19 @@ function isTimeoutAbort(error: unknown, signal: AbortSignal): boolean {
 }
 
 /**
+ * Sum a field across every completed step's usage, treating `undefined` as
+ * "no data" the way the rest of the codebase does: an individual step's
+ * `undefined` contributes 0 to the sum, but the overall result is
+ * `undefined` only when *no* step reported a defined value — a sum of
+ * "no data" entries is still "no data", not 0.
+ */
+function sumUsageField(values: Array<number | undefined>): number | undefined {
+  const defined = values.filter((value): value is number => value !== undefined)
+  if (defined.length === 0) return undefined
+  return defined.reduce((total, value) => total + value, 0)
+}
+
+/**
  * Run one investigation: a bounded `generateText` tool loop with the three
  * read-only tools (`read_file`, `list_dir`, `grep`). Takes an
  * already-constructed model so the same function serves both the CLI (a
@@ -151,6 +185,58 @@ export async function runScoutling(options: RunOptions): Promise<RunResult> {
   // JSON.stringify of the structured result would overstate it by ~40 %.
   let bytesAtPreviousStep = 0
 
+  // Every step's `StepResult` as it finishes — the same object
+  // `onStepFinish` already receives below, just also kept around. This is
+  // what lets a timeout salvage a partial answer (Change 2, DESIGN.md §15):
+  // `generateText` rejects the whole promise on abort, discarding its own
+  // return value, so anything worth keeping has to be captured as it goes
+  // rather than read off the (never-produced) final result.
+  const completedSteps: StepResult<typeof tools>[] = []
+
+  /**
+   * Build a `RunResult` from whatever steps completed before the wall-clock
+   * timeout fired. Only called when `completedSteps.length > 0` — a
+   * zero-step timeout still throws `ScoutlingError('TIMEOUT')` exactly as
+   * before, since there is nothing here to salvage.
+   */
+  function buildTimeoutResult(): RunResult {
+    const toolCalls = countToolCalls(completedSteps.flatMap((step) => step.toolCalls))
+
+    // The most recent step with something to say — an earlier step's text
+    // is stale once a later step ran more tool calls off of it, and a step
+    // that only called tools contributes an empty `text`.
+    let answer = ''
+    for (let i = completedSteps.length - 1; i >= 0; i--) {
+      const text = completedSteps[i]?.text ?? ''
+      if (text.trim().length > 0) {
+        answer = text
+        break
+      }
+    }
+
+    const citations = verifyCitations(options.scopeRoot, answer)
+
+    const exhaustedBy: RunResult['exhaustedBy'] = ['timeout']
+    if (toolOutputBudget.exhausted) exhaustedBy.push('bytes')
+
+    return {
+      answer,
+      stepsUsed: completedSteps.length,
+      toolCalls,
+      exhausted: true,
+      exhaustedBy,
+      timedOut: true,
+      usage: {
+        inputTokens: sumUsageField(completedSteps.map((step) => step.usage.inputTokens)),
+        outputTokens: sumUsageField(completedSteps.map((step) => step.usage.outputTokens)),
+      },
+      wallMs: Date.now() - startedAt,
+      toolOutputBytes: toolOutputBudget.spent,
+      toolCallErrors: countToolCallErrors(completedSteps),
+      citations,
+    }
+  }
+
   // Declared with no annotation so TypeScript infers it from the assignment
   // below, keeping the tool-typed result rather than the SDK's placeholder.
   let result
@@ -165,6 +251,8 @@ export async function runScoutling(options: RunOptions): Promise<RunResult> {
       maxOutputTokens: budget.maxOutputTokens,
       abortSignal,
       onStepFinish: (step) => {
+        completedSteps.push(step)
+
         const bytes = toolOutputBudget.spent - bytesAtPreviousStep
         bytesAtPreviousStep = toolOutputBudget.spent
 
@@ -179,6 +267,12 @@ export async function runScoutling(options: RunOptions): Promise<RunResult> {
     })
   } catch (error) {
     if (isTimeoutAbort(error, abortSignal)) {
+      // A timeout that still has completed steps to show for itself is
+      // salvageable — "here is partial evidence" and "the provider never
+      // answered" are different things to tell a caller, so only the latter
+      // (zero completed steps) keeps throwing.
+      if (completedSteps.length > 0) return buildTimeoutResult()
+
       throw new ScoutlingError(
         'TIMEOUT',
         `The run did not finish within ${budget.timeoutMs}ms.`,
@@ -192,7 +286,10 @@ export async function runScoutling(options: RunOptions): Promise<RunResult> {
 
   const toolCalls = countToolCalls(result.toolCalls)
 
-  // A run is exhausted for either of two independent reasons:
+  // A run is exhausted for either or both of two independent reasons — both
+  // are recorded in `exhaustedBy` (Phase 6 measured a run that hit both: a
+  // question exhausted on bytes twice and on steps once across different
+  // paths through the same budget):
   //
   //  - the step cap cut it off mid-loop while the model still wanted to
   //    call tools (finishReason 'tool-calls'). A model that simply finished
@@ -208,7 +305,9 @@ export async function runScoutling(options: RunOptions): Promise<RunResult> {
   // finishReason is `{unified, raw}`, but by the time it surfaces on
   // StepResult/GenerateTextResult the SDK has already unwrapped it to the
   // plain `FinishReason` string — there is no `.unified` here.
-  const exhausted = result.finishReason === 'tool-calls' || toolOutputBudget.exhausted
+  const exhaustedBy: RunResult['exhaustedBy'] = []
+  if (result.finishReason === 'tool-calls') exhaustedBy.push('steps')
+  if (toolOutputBudget.exhausted) exhaustedBy.push('bytes')
 
   const citations = verifyCitations(options.scopeRoot, result.text)
 
@@ -216,7 +315,9 @@ export async function runScoutling(options: RunOptions): Promise<RunResult> {
     answer: result.text,
     stepsUsed: result.steps.length,
     toolCalls,
-    exhausted,
+    exhausted: exhaustedBy.length > 0,
+    exhaustedBy,
+    timedOut: false,
     usage: {
       inputTokens: result.totalUsage.inputTokens,
       outputTokens: result.totalUsage.outputTokens,
