@@ -217,11 +217,42 @@ is it using that model?" is a one-command answer. `scoutling init` (v1.1) append
 
 | preset | maxSteps | maxToolOutputBytes | timeoutMs | maxOutputTokens |
 |---|---|---|---|---|
-| `quick` | 4 | 16 000 | 90 000 | 4 000 |
-| `normal` (default) | 8 | 40 000 | 180 000 | 10 000 |
-| `deep` | 15 | 120 000 | 420 000 | 16 000 |
+| `quick` | 6 | 40 000 | 300 000 | 8 000 |
+| `normal` (default) | 12 | 80 000 | 600 000 | 12 000 |
+| `deep` | 24 | 200 000 | 1 200 000 | 16 000 |
 
 Any individual cap is overridable (`--max-steps`, `--max-tool-bytes`, `--timeout-ms`).
+
+**These numbers were re-sized from measurement in Phase 6** (2026-08-28), replacing this
+document's original guesses. The distributions behind them — 266 real code files and 187
+markdown files across two repositories, charged the way `ToolOutputBudget` charges them — are in
+`docs/dogfood-log.md`; the derivation is commented in `src/budget.ts`. Three things the
+measurement changed:
+
+- **A default `read_file` page is 3-7 KB at the median, not 17 KB.** The 17.3 KB figure this
+  re-sizing was queued under was one file (`src/tools/grep.ts`, this repo's largest); across
+  real files it is the *p90*, and 81-91 % of reads come in under 16 KB. So "`quick` cannot
+  afford a single read" was wrong — `quick`'s real defect was that its 16 000 cap **equalled**
+  `TOOL_CALL_RESERVATION_BYTES`, which meant `admit` let exactly one call through and marked the
+  run exhausted the moment a model issued a parallel pair. Concurrency was off for that preset
+  by arithmetic accident.
+- **Caps are sized against observed runs, not single calls.** The largest observed useful run
+  cost 33 KB over 6 steps; at the old `normal` cap of 40 KB that same question exhausted at
+  34.9 KB and wrote *no answer at all*. `normal` is now 2.4x that run, `quick` is one grep plus
+  two p90 reads, `deep` is 2.5x `normal`.
+- **Timeouts are `maxSteps × 40 s + 90 s`** — per-step and cold-load figures both observed on
+  the reference machine. The old `normal` 180 s was *less* than an observed healthy 3.5-minute
+  run, which is why `script/smoke.ts` had to pass `--timeout-ms` at all. A timeout is a backstop
+  against a hang, not a cost control: steps and bytes are the cost control, and a timeout that
+  fires discards every step the run completed (§15).
+
+`TOOL_CALL_RESERVATION_BYTES` was re-tuned in the same pass and **deliberately left at 16 000**.
+Lowering it does not simply buy parallelism: worst-case overshoot is (calls admitted) × (a
+call's real size), so a smaller reservation admits more oversized calls through the same window.
+Against the largest observed read (32 KB), 16 000 holds the worst case to 2.0-2.4x a cap where
+12 000 gives 2.7-3.2x — for one extra concurrent call under `quick`. With the re-sized caps the
+same constant admits 3 / 5 / 13 concurrent calls under `quick` / `normal` / `deep`, against
+1 / 3 / 8 before.
 
 - **Steps alone don't bound cost.** 8 steps × 400-line reads can blow a small local context
   mid-loop. `budget.ts` tracks cumulative tool-result bytes; past the cap, further results are
@@ -235,6 +266,13 @@ Any individual cap is overridable (`--max-steps`, `--max-tool-bytes`, `--timeout
   System prompt + 4 k of `CLAUDE.md` + one 400-line read exceeds that. `scoutling doctor` (§9)
   warns when it can read the loaded context length; README says "set ≥ 32 k for the model you
   point scoutling at".
+  **The byte cap is really a context budget**, because every tool result stays in the
+  conversation for the rest of the run. At roughly 3.6 bytes per token for line-numbered code,
+  the re-sized caps imply ≈ 11 k tokens of tool output for `quick`, ≈ 22 k for `normal` and
+  ≈ 55 k for `deep`, before the system prompt, the question and the model's own text. So `quick`
+  and `normal` both fit the README's 32 k floor, and **`deep` needs ≥ 64 k** — worth saying
+  where `--budget deep` is documented, since a model that runs out of context mid-loop fails in
+  a much less legible way than one that hits a cap.
 - On budget exhaustion (any cap, steps included) the answer is still returned, flagged `exhausted: true`, with a
   next-step hint ("narrow `--path` or ask a more specific question"); exit code 1, not 0.
 
@@ -277,7 +315,9 @@ scoutling init <claude-code|codex|opencode|cursor>   # v1.1 — writes the integ
 ```
 
 - **`text`** (default): the answer, prose, stdout only. **`json`**: `{answer, sources, model,
-  usage, stepsUsed, toolCalls:{read_file,list_dir,grep}, exhausted, timedOut, wallMs}`.
+  usage, stepsUsed, toolCalls:{read_file,list_dir,grep}, exhausted, timedOut, wallMs,
+  toolOutputBytes, toolCallErrors}`. The last two postdate this list (Phase 4 and Phase 5
+  additions respectively — see `output.ts`'s `formatAnswerJson`) but ship in every run's JSON.
 - `--verbose`: per-step log to stderr (tool name, args summary, bytes returned).
 - **Errors** are one-line JSON on stderr with a code, and map to exit codes:
   `0` ok · `1` answered but budget exhausted / no verified citations under `--require-citations`
@@ -352,17 +392,37 @@ timing, which the harness records per run (`stepsUsed`, `toolCallErrors`, `exhau
 
 **Question sets:**
 - `eval/questions.example.json` — 2 self-referential questions about scoutling's own source
-  (hermetic, runs in any checkout; used in CI as a smoke test when a `SCOUTLING_EVAL_BASE_URL`
-  secret is present, skipped otherwise).
-- The 9 real questions mined from `local-ai` history (5 `Explore` surveys, 4 doc-vs-code audits
-  with known stale facts: "13 signal categories" vs 22 types, "139 tickers" vs 145,
-  `EDGAR_PHRASES` 13 vs 18, "every strategy excludes financials" vs 3/23) live in the `local-ai`
-  repo as `docs/scoutling-eval.json` — they reference that private repo's paths. Run with
-  `scoutling-eval --questions ../local-ai/docs/scoutling-eval.json --repo ../local-ai`.
+  (hermetic, runs in any checkout). **Not wired into CI**: no GitHub-hosted runner can reach the
+  reference machine's LM Studio, so a job gated on a `SCOUTLING_EVAL_BASE_URL` secret would be
+  permanently skipped — dead weight rather than a check. `docs/eval.md` records the reasoning.
+- The 9 real questions (5 surveys, 4 doc-vs-code audits) live in the `local-ai` repo as
+  `docs/scoutling-eval.json` — they reference that private repo's paths. Run with
+  `pnpm eval --questions ../local-ai/docs/scoutling-eval.json --repo ../local-ai --models <ids>`.
 
-**Grading, scoped honestly:** the 4 questions with known facts are graded yes/no on surfacing
-that fact. The other 5 are graded manually against what Petr recalls from the original Sonnet
-runs — softer, and stated as such. This eval answers *"which local model should the README
+  **The four audits are not the ones this section originally named** (written 2026-08-28, after
+  checking every one). Three of them — "13 signal categories" vs 22 types, `EDGAR_PHRASES` 13 vs
+  18, "every strategy excludes financials" vs 3/23 — were fixed in `local-ai` on 2026-08-24 by
+  commit `91f4d2f`, so doc and code now agree and there is no stale fact to surface. The fourth,
+  "139 tickers" vs 145, survives only in `.claude/skills/signals-research/SKILL.md`, which
+  scoutling's `grep` **cannot reach**: ripgrep skips hidden directories unless `--hidden` is
+  passed, so a claim under `.claude/` is undiscoverable even though `list_dir` lists it and
+  `read_file` reads it (see §15). The replacements — a scheduler comment claiming 7 strategies
+  against `BOOK_STRATEGIES`'s 22, a backtest runner header wrong on both strategy count (23) and
+  as-of dates (14), "the 23 layers" against a `LAYERS` that de-duplicates to 25, and a Form 4
+  comment claiming 118 tickers against a derived 139 — were each counted by hand, and sit in four
+  different files across three directories so one future edit cannot invalidate the set.
+
+  The lesson generalises: **an audit question is only as durable as the staleness it targets**.
+  Re-verify the facts before trusting a grade, and treat a question set as perishable.
+
+**Grading, scoped honestly:** the 4 questions with known facts carry an `expect.mustMatch` list
+of regexes, and the harness reports a mechanical `auto` verdict from them. That verdict is a
+**proxy, never the grade**: the summary's `correct?` column is left empty on *every* row,
+auto-graded ones included, and is the human's. A regex can match a copy-pasted code fragment as
+easily as an understood claim. Each matcher is checked when written against both a plausible
+correct answer and a plausible *wrong* one, so it discriminates rather than merely matching — a
+bare `-e` or a bare `139` passes almost anything. The other 5 are graded manually against what
+Petr recalls from the original Sonnet runs — softer, and stated as such. This eval answers *"which local model should the README
 recommend as a starting point"* — not *"is local delegation as good as Sonnet"*. The winner
 (equal-or-better on known-facts questions at lower time/tokens) is documented in README and
 `local-ai`'s `scoutling.config.json`, never baked into the tool.
@@ -404,21 +464,26 @@ recommend as a starting point"* — not *"is local delegation as good as Sonnet"
    reported "no problems found" for a config with no model, which cannot run anything at all.
 5. **Eval harness** — `run-eval.ts`, example questions, `docs/eval.md`; write
    `local-ai/docs/scoutling-eval.json` with the 9 seeds.
-6. **Run the reference eval** across the 4 models, grade, pick the recommended model, tune
-   preset numbers from observed `stepsUsed`/bytes, record results in `docs/eval.md` + README.
-   **Do the preset re-sizing first, before grading anything.** Phase 4 measured that a default
-   400-line `read_file` page of a real source file is **17.3 KB**, which is larger than the
-   entire `quick` preset's 16 KB tool-output budget — `quick` cannot afford a single default
-   read, so any `quick` result graded before that is measuring the preset, not the model.
-   `normal` is marginal for the same reason: the smoke question needs 6 steps and 33 KB against
-   caps of 8 and 40 KB, and one observed run spent all 8 steps without writing an answer
-   (`docs/dogfood-log.md`). Re-size the three presets against `read_file`'s real page cost, then
-   run the eval. **Re-tune `TOOL_CALL_RESERVATION_BYTES` in the same pass**: since the byte
-   budget admits a call by reserving that many bytes up front, the reservation and the cap
-   together decide how many tool calls a step may run in parallel — at today's 16 KB reservation
-   that is 1 call for `quick`, 3 for `normal` and 8 for `deep`. A reservation at or above a
-   preset's cap disables concurrency for that preset entirely, which is a real behavioural knob
-   and not just an accounting detail.
+6. **Run the reference eval** across the 4 models, grade, pick the recommended model, record
+   results in `docs/eval.md` + README.
+   ~~**Do the preset re-sizing first, before grading anything.**~~ — **DONE 2026-08-28**, ahead
+   of the eval rather than after it, so no cell is graded against a preset that was a guess.
+   §7 carries the new table and the derivation; `docs/dogfood-log.md` carries the raw
+   distributions. Two of the premises this item was written under turned out to be wrong, and
+   the corrections are the useful part:
+   - The **17.3 KB** default read was one file, this repo's largest. Measured across 266 real
+     code files it is the p90; the median is 3-7 KB, and 81-91 % of reads fit inside the old
+     16 KB `quick` cap. "`quick` cannot afford a single default read" was false.
+   - What `quick` actually could not do was run **two tool calls in one step**: its cap equalled
+     `TOOL_CALL_RESERVATION_BYTES` exactly, so the second concurrent call was refused and the
+     run was marked exhausted. Re-sizing the caps fixed that; the reservation itself was
+     **left at 16 000**, because lowering it admits more oversized calls through the same window
+     and makes worst-case overshoot worse (2.7-3.2x a cap at 12 000, against 2.0-2.4x at
+     16 000). Parallelism is now 3 / 5 / 13 calls under `quick` / `normal` / `deep`.
+   `test/budget.test.ts` pins both ends of that trade, so the next tuner has to state a new
+   parallelism out loud rather than drift into one. **What remains in this item is the eval run
+   and the grading**, plus a second re-tune once the eval produces `stepsUsed`/bytes across four
+   models and a scope larger than this repo.
 7. **Integrations + adoption** — `docs/integrations/*.md`; in `local-ai`: `scoutling.config.json`,
    `.claude/skills/scoutling/SKILL.md`, one line in `CLAUDE.md`.
 8. **Publish** — README with the eval numbers, `npm publish --provenance` from CI on `v0.1.0`
@@ -458,6 +523,46 @@ delegation rule; review, eval grading and the README claims stay in the main loo
 >   Requiring a line number (§8) removed every false positive observed so far, but not this
 >   class. Low frequency and low harm (it lands as one unverifiable source), so it is worth
 >   revisiting against Phase 5's question set rather than guessing at a fix now.
+
+> **Deferred from Phase 6's preset re-sizing** (found by measuring; triaged 2026-08-28 as
+> "after Phase 5"):
+>
+> - **`grep`'s `contextLines` can cost more than the whole-file read it replaces.** The Phase 4
+>   follow-up justified it on a *selective* pattern: 1.9 KB of `grep` plus a 17.7 KB `read_file`,
+>   replaced by ~540 bytes. Measured across broad patterns it inverts — `contextLines: 3` runs
+>   23-33 KB at the median and up to 60 KB, against 8-10 KB for the same pattern at
+>   `contextLines: 0`, i.e. more than a p90 whole-file read, and 50-75 % of such calls exceed a
+>   whole `TOOL_CALL_RESERVATION_BYTES` on their own (`docs/dogfood-log.md`). The saving is real
+>   but conditional on pattern selectivity, and neither the tool description nor the system
+>   prompt says so. Two candidate fixes — a line of advice in the tool description, or a
+>   structural cap that refuses/downgrades `contextLines` when the match count would make the
+>   context blocks dominate. Deliberately **not** fixed before the eval: whether models actually
+>   reach for `contextLines` with broad patterns is a behavioural question Phase 6 measures
+>   directly, and changing the prompt first would mean tuning against a guess and moving the
+>   baseline the eval is supposed to establish.
+
+> **Found while building the Phase 5 question set** (2026-08-28, verified against the installed
+> ripgrep 15.0.0; untriaged — needs a decision, see below):
+>
+> - **`grep` and `list_dir` disagree about hidden files, which is the exact divergence
+>   `--no-require-git` exists to prevent.** ripgrep skips dot-directories unless `--hidden` is
+>   passed, and `grep.ts` does not pass it; `scope-walk.ts` (behind `list_dir`) applies
+>   `.gitignore` but has no hidden-file rule of its own. So in a scope containing a
+>   non-gitignored `.claude/`, `list_dir` lists `.claude/skills/…/SKILL.md`, `read_file` reads it
+>   in full, and `grep` cannot find a single string inside it. Reproduced against `local-ai`: the
+>   phrase `139 tickers` exists only in that file, and `rg --no-require-git` returns nothing while
+>   `rg --no-require-git --hidden` returns the line. It cost a real eval question, which is how it
+>   was found — a doc under `.claude/` is undiscoverable to a run that has not been told its path.
+>   **The fix direction is a genuine decision, not a bug to squash blindly.** Adding `--hidden`
+>   makes the two agree by widening what `grep` sees — including `.git/`'s object store, which is
+>   large and useless, and any non-gitignored dotfile holding credentials. Teaching
+>   `scope-walk.ts` to skip hidden entries makes them agree by narrowing `list_dir` and
+>   `read_file` instead, which is the safer default but hides `.claude/`, `.github/` and
+>   `.vscode/` — directories a caller may legitimately want investigated. A third option is to
+>   pass `--hidden` plus an explicit `--glob '!.git/'`, and to say in the tool descriptions that
+>   dot-directories are in scope. Whichever way it goes, the invariant is that all three tools
+>   agree, and a test should assert that agreement directly rather than each tool's behaviour
+>   separately.
 
 1. **Read-only git tools** — `git_log`, `git_blame`, `git_diff` (execFile, `--` guarded). "When
    did X change and why" is the most common question the three fs tools can't answer. v0.2.

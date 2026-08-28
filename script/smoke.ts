@@ -24,22 +24,20 @@ const QUESTION =
   'Where is the guard that stops a model-chosen grep pattern from being parsed as a ripgrep ' +
   'flag, and what exactly does it do? Cite path:line.'
 
-// Cold JIT model load in LM Studio can take 60s+ (DESIGN.md §7), and since
-// Phase 3 a run gets 8 steps rather than 3 and spends the first one or two on
-// discovery — observed runs of this exact question land around 3.5 minutes on
-// qwen/qwen3-coder-next. 120s was right for Phase 2 and would now fail a
-// perfectly healthy run. Still bounded, so nothing hangs when the endpoint is
-// simply not listening.
-const SMOKE_TIMEOUT_MS = 300_000
-
-// Passed to the run explicitly, and deliberately equal to the smoke's own
-// backstop above. Since Phase 4 the CLI enforces its own wall-clock budget,
-// and the `normal` preset's 180s is *less* than the 3.5 minutes this exact
-// question has been observed to take — so without this the run would abort
-// itself with TIMEOUT (exit 4) before the smoke's outer race ever fired, and
-// a perfectly healthy endpoint would look broken. The outer race stays as a
-// backstop for a hang that happens outside the run's own accounting.
-const RUN_TIMEOUT_MS = SMOKE_TIMEOUT_MS
+// Purely a backstop for a hang *outside* the run's own accounting — a socket
+// that accepts and never answers, say. It is deliberately a little longer
+// than the `normal` preset's own 600s wall-clock budget (DESIGN.md §7) so
+// that a run which genuinely overruns is reported by the CLI as TIMEOUT
+// (exit 4), with its own message and hint, rather than being cut off here
+// with neither.
+//
+// Before the Phase 6 re-sizing this was the other way round: `normal` allowed
+// 180s against a question observed to take ~3.5 minutes, so the smoke had to
+// pass an explicit `--timeout-ms` and `--budget deep` to stop a healthy
+// endpoint from looking broken. Both workarounds existed only because the §7
+// numbers were guesses; the smoke now runs on the shipped defaults, which is
+// what it should have been testing all along.
+const SMOKE_TIMEOUT_MS = 660_000
 
 async function main(): Promise<number> {
   console.error(`scoutling smoke: ${BASE_URL} model=${MODEL}`)
@@ -70,18 +68,15 @@ async function main(): Promise<number> {
       BASE_URL,
       '--path',
       '.',
-      // `deep`, not the `normal` default, on purpose. This question has been
-      // measured at 6 steps and 33 KB of tool output — inside `normal`'s 8
-      // and 40 KB, but close enough that a run which explores one extra file
-      // exhausts and answers nothing. That happened on the first Phase 4
-      // smoke. Whether `normal` is big enough is a real question, but it is
-      // a *tuning* question that belongs to the eval (Phase 6) and the
-      // dogfood log; letting it decide whether the smoke passes would mean a
-      // healthy build failing at random.
-      '--budget',
-      'deep',
-      '--timeout-ms',
-      String(RUN_TIMEOUT_MS),
+      // No `--budget` and no `--timeout-ms`: the smoke runs on the **shipped
+      // defaults**, so what it proves is that the default preset can answer a
+      // real question. Through Phase 4 it had to ask for `deep` because this
+      // question costs 6 steps and 33 KB against `normal`'s then-8 and 40 KB
+      // — close enough that exploring one extra file exhausted the run and it
+      // answered nothing, which is exactly what happened on the first Phase 4
+      // smoke. Phase 6 re-sized `normal` to 12 steps and 80 KB from measured
+      // distributions, so the headroom is now real and the smoke should be
+      // exercising what users actually get.
       '--require-citations',
       '--verbose',
     ],

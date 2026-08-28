@@ -1,0 +1,19 @@
+{
+  "description": "Two self-referential questions about scoutling's own source, both proven answerable by real runs (see docs/dogfood-log.md). This file doubles as the question-set schema's documentation: grep-flag-guard is auto-gradable (it has `expect`), walk-scope-truncation is graded manually (no `expect`, just a `note` for the grader). Neither pins a `budget` — that per-question key exists and is documented in docs/eval.md, but leaving it off lets one invocation sweep the whole set at quick, normal and deep via --budget, which is what tuning the DESIGN.md §7 presets needs. Hermetic: runs against any checkout of this repo, so pass --repo pointing at wherever scoutling itself is checked out.",
+  "questions": [
+    {
+      "id": "grep-flag-guard",
+      "question": "Where is the guard that stops a model-chosen grep pattern from being parsed as a ripgrep flag, and what exactly does it do? Cite path:line.",
+      "expect": {
+        "fact": "the guard passes the pattern as `-e <pattern>` and terminates flags with `--` before the search target, in src/tools/grep.ts",
+        "mustMatch": ["src/tools/grep\\.ts", "[\\s`'\"\\[]-e[\\s`'\"\\],]"]
+      },
+      "note": "The second matcher requires `-e` as a standalone token rather than a bare substring: a plausible-but-wrong answer that says the guard 'rejects anything that looks like a code-execution attempt' contains the substring -e and would otherwise auto-pass. Verified against a real run's answer (2026-08-28) and against that wrong answer."
+    },
+    {
+      "id": "walk-scope-truncation",
+      "question": "How does walkScope decide that a listing was truncated, and why is it done that way? Cite path:line.",
+      "note": "Graded manually. The correct answer is the limit+1 lookahead: walkScope collects one entry past the cap so it can tell 'there was more' apart from 'we reached the cap exactly' — a false truncated flag would send a small model chasing a listing that was already complete. Check the answer cites the actual lookahead logic, not just the existence of a limit."
+    }
+  ]
+}

@@ -1,17 +1,16 @@
 #!/usr/bin/env node
-import { readFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
-import { APICallError, RetryError } from 'ai'
 
 import { isBudgetPreset, resolveBudget } from './budget.js'
+import { classifyRunError } from './classify-run-error.js'
 import { runDoctorCommand, runModelsCommand } from './commands.js'
 import { loadConfig } from './config.js'
 import { ScoutlingError } from './errors.js'
-import { resolvePath, resolveScopeRoot } from './guardrails.js'
+import { resolveScopeRoot } from './guardrails.js'
 import { runScoutling, type StepSummary } from './loop.js'
 import { formatAnswerJson, formatAnswerText, isOutputFormat, type OutputFormat } from './output.js'
-import { buildSystemPrompt } from './prompt.js'
-import { createProvider, listModels } from './provider.js'
+import { listModels } from './provider.js'
+import { buildRunInputs, type RunInputs } from './run-setup.js'
 import type { ScoutlingConfig } from './types.js'
 
 const USAGE = `🐦 scoutling — read-only, bounded codebase investigation with list_dir, grep and read_file.
@@ -205,29 +204,6 @@ function formatStepLog(step: StepSummary): string {
   return `[step ${step.index}] ${calls || '(answer)'} — ${step.bytes} bytes`
 }
 
-/**
- * Classify what generateText threw. A connection failure surfaces as
- * RetryError wrapping an APICallError whose statusCode is undefined — fetch
- * itself failed, so no HTTP response ever came back. An APICallError *with*
- * a statusCode is a real response from the provider (e.g. model not found)
- * and is reported as-is, not masked as "unreachable".
- */
-function classifyRunError(error: unknown, baseUrl: string): ScoutlingError {
-  const candidate = RetryError.isInstance(error) ? error.lastError : error
-
-  if (APICallError.isInstance(candidate) && candidate.statusCode === undefined) {
-    return new ScoutlingError(
-      'PROVIDER_UNREACHABLE',
-      `Could not reach the provider at ${baseUrl}.`,
-      'Check --base-url and that the provider (e.g. LM Studio) is running.',
-    )
-  }
-
-  if (error instanceof ScoutlingError) return error
-
-  return new ScoutlingError('INTERNAL', error instanceof Error ? error.message : String(error))
-}
-
 /** Everything runCli needs from the outside world, all injectable for hermetic tests. */
 export interface CliIO {
   argv: string[]
@@ -380,34 +356,20 @@ export async function runCli(io: CliIO): Promise<number> {
     return emitError(new ScoutlingError('BAD_ARGS', '--model is required.', hint))
   }
 
-  let systemPromptOverride: string | undefined
-  if (config.systemPromptFile !== null) {
-    try {
-      systemPromptOverride = readFileSync(resolvePath(scopeRoot, config.systemPromptFile), 'utf8')
-    } catch {
-      return emitError(
-        new ScoutlingError(
-          'BAD_ARGS',
-          `systemPromptFile not found: ${config.systemPromptFile}`,
-          'Fix or remove systemPromptFile in the config.',
-        ),
-      )
-    }
+  // Shared with eval/run-eval.ts (Phase 5) — see run-setup.ts's own doc
+  // comment for why this must be the one place both build a model + system
+  // prompt from resolved config.
+  let model: RunInputs['model']
+  let systemPrompt: string
+  try {
+    ;({ model, systemPrompt } = buildRunInputs({
+      scopeRoot,
+      config,
+      ...(io.fetch ? { fetch: io.fetch } : {}),
+    }))
+  } catch (error) {
+    return emitError(error instanceof ScoutlingError ? error : new ScoutlingError('INTERNAL', String(error)))
   }
-
-  const systemPrompt = buildSystemPrompt({
-    scopeRoot,
-    contextFiles: config.contextFiles,
-    contextFilesMaxChars: config.contextFilesMaxChars,
-    ...(systemPromptOverride !== undefined ? { systemPromptOverride } : {}),
-  })
-
-  const provider = createProvider({
-    baseUrl: config.baseUrl,
-    apiKey: config.apiKey,
-    ...(io.fetch ? { fetch: io.fetch } : {}),
-  })
-  const model = provider.chatModel(config.model)
 
   const budget = resolveBudget(config.budget, {
     ...(args.maxSteps !== undefined ? { maxSteps: args.maxSteps } : {}),

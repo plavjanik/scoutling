@@ -38,7 +38,10 @@ function answerOrEmptyState(result: RunResult): string {
 /**
  * DESIGN.md §9's documented JSON object, verbatim key set plus
  * `toolOutputBytes` (a Phase 4 addition the design doc's list predates —
- * Phase 6 tunes the budget presets from it, so it stays).
+ * Phase 6 tunes the budget presets from it, so it stays) and
+ * `toolCallErrors` (the same kind of Phase 5 addition, for the same reason:
+ * DESIGN.md §12's eval harness reads it off every run to tell which models
+ * can reliably emit a well-formed tool call).
  *
  * Pretty-printed with a trailing newline: a parent agent's `jq` handles
  * either, but a human staring at raw CLI output during debugging does not.
@@ -61,6 +64,7 @@ export function formatAnswerJson(result: RunResult, model: string): string {
     timedOut: false,
     wallMs: result.wallMs,
     toolOutputBytes: result.toolOutputBytes,
+    toolCallErrors: result.toolCallErrors,
   }
   return `${JSON.stringify(output, null, 2)}\n`
 }

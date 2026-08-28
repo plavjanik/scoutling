@@ -32,9 +32,54 @@ Verdict is one of:
 | 2026-08-28 | scoutling | "What does resolvePath do when a path points outside the scope root?" | qwen/qwen3-coder-next | 4/8 | no | useful | First run on Phase 4: `--format json --require-citations`, exit 0. grep -> read `guardrails.ts` -> read its test -> answered. 16.1 KB of tool output, 1m54s. Both verified citations hand-checked exact (`guardrails.ts:46` is the signature; `:69-70` are the message and hint it quotes). 6 of 8 extracted sources came back unverifiable, and only 4 of those are model errors -- see the citation-noise observation below. |
 | 2026-08-28 | scoutling | "Where is the guard that stops a grep pattern being parsed as a ripgrep flag?" (smoke) | qwen/qwen3-coder-next | 8/8 | **yes** | gave up | First run under `--require-citations`, `normal` budget. Spent all 8 steps exploring (2 extra greps and a `list_dir` into `docs/adr`) and wrote no answer at all. 34.9 KB of 40 KB, so *steps* bound here, not bytes. Exit 1 with both warning lines. |
 | 2026-08-28 | scoutling | same question, `--budget deep` | qwen/qwen3-coder-next | 6/15 | no | useful | 32.8 KB, 125 s, 3 of 6 sources verified. `grep.ts:207` is exactly the `['-e', pattern, '--', searchTarget]` guard; hand-checked. This is what the question actually costs: inside `normal`'s caps, but with almost no headroom. |
+| 2026-08-28 | scoutling | same question, **on the re-sized `normal` default** (smoke) | qwen/qwen3-coder-next | 6/12 | no | useful | First run after the Phase 6 re-sizing, and the direct evidence for it: no `--budget`, no `--timeout-ms`, exit 0, **5 of 5 sources verified** and all five hand-checked exact (`grep.ts:236` is the `[...flags, '-e', pattern, '--', searchTarget]` line, `grep.ts:206-212` its comment, `DESIGN.md:210-213`, `grep-injection.test.ts:119` and `:47-60`). 45.4 KB of tool output over 5 tool calls (2.8 + 19.0 + 15.5 + 7.0 + 1.0 KB) = 57 % of the new 80 KB cap. **Under the old 40 KB cap this exact run would have been refused at its fourth call** (44.4 KB by then), which is the failure the two rows above recorded twice. Note step 1's 19.0 KB read — above `TOOL_CALL_RESERVATION_BYTES`, exactly the p90 tail the reservation is sized to absorb. |
+| 2026-08-28 | **local-ai** | "Does scheduler.ts's book-tournament comment match the code it points at?" (via `pnpm eval`) | qwen/qwen3-coder-next | 3/12 | no | useful | **First run against a scope larger than this repo**, and the first through the Phase 5 eval harness. 17.7 KB, 16 s, 2 of 2 sources verified — both hand-checked (`scheduler.ts:114` is the stale "7-strategy" comment, `sweep.ts:50` the `BOOK_STRATEGIES` array). It enumerated all 22 entries by name and got 22, matching my own count. Cheap: 3 steps and 22 % of the `normal` byte cap on a repo ~30x this one, because `grep` landed it on the right two files immediately. Auto-grade `pass` here was a true positive, confirmed by reading the answer. |
+
+## Tool-call cost measurement (2026-08-28) — the basis of the §7 re-sizing
+
+Phase 6's preset re-sizing needed a distribution, not the one file Phase 4 happened to measure.
+Every number below is what `ToolOutputBudget` charges — the rendered `toModelOutput`, TOON for
+`list_dir`/`grep` — collected by driving the real tools through `withToolOutputBudget` and
+reading `budget.spent`, so it is the same number `--max-tool-bytes` enforces and `--verbose`
+prints. Two scopes: this repo (42 code, 11 markdown) and `local-ai` (224 code, 176 markdown).
+
+| call | scope | median | p75 | p90 | max | share > 16 KB |
+|---|---|---|---|---|---|---|
+| `read_file` default (400 lines), code | scoutling | 6.6 KB | 13.8 KB | 16.8 KB | 20.6 KB | 19 % |
+| `read_file` default (400 lines), code | local-ai | 3.1 KB | 6.7 KB | 15.1 KB | 31.9 KB | 9 % |
+| `read_file` default, markdown | local-ai | 2.9 KB | 3.6 KB | 6.4 KB | 11.4 KB | 0 % |
+| `read_file` `limit: 120`, code | both | 3.5-5.1 KB | 5.0-5.4 KB | 6.0-6.1 KB | 7.3 KB | 0 % |
+| `list_dir` | both | 0.1-0.4 KB | 0.4 KB | 0.6 KB | 0.7 KB | 0 % |
+| `grep` `contextLines: 0` | both | 7.7-10.1 KB | 9.5-10.6 KB | 10.3-12.3 KB | 14.0 KB | 0 % |
+| `grep` `contextLines: 3` | both | 23.1-32.9 KB | 40.9-59.6 KB | 43.0-59.9 KB | 59.9 KB | 50-75 % |
+
+What it settled:
+
+- **The premise behind the re-sizing was wrong in an interesting way.** "A default read is
+  17.3 KB, larger than the whole `quick` budget" was `src/tools/grep.ts`, this repo's largest
+  source file. Across 266 real code files that is the p90; the median is 3-7 KB. `quick` could
+  afford several default reads all along.
+- **`quick`'s real defect was concurrency, not size.** Its 16 000 cap equalled
+  `TOOL_CALL_RESERVATION_BYTES`, so `admit` let exactly one call through and a parallel pair
+  marked the run exhausted immediately. Invisible to every existing test, because a *sequential*
+  run of small calls behaves identically. `test/budget.test.ts` now gates on it.
+- **The reservation stayed at 16 000.** Worst-case overshoot is (calls admitted) x (a call's
+  real size), so lowering it admits more oversized calls through the same window: measured
+  against the 32 KB largest observed read, 16 000 holds the worst case to 2.0-2.4x a cap where
+  12 000 gives 2.7-3.2x and 10 000 gives 3.2x, for one extra concurrent call under `quick`.
+  Caught by the existing Phase 4 regression test when a 12 000 value was tried — the test did
+  exactly the job it was written for.
 
 ## Open observations
 
+- **`grep` with `contextLines` can cost more than the whole-file read it replaces — not yet
+  acted on.** The Phase 4 follow-up added `contextLines` on the measured case of a narrow
+  pattern: `grep` 1.9 KB then a 17.7 KB `read_file`, replaced by ~540 bytes. That holds for a
+  specific pattern. For a *broad* one it inverts: `contextLines: 3` measures 23-33 KB at the
+  median and up to 60 KB, against 8-10 KB for the same pattern at `contextLines: 0` — more than
+  a p90 whole-file read, and 50-75 % of such calls exceed a single reservation. The saving is
+  real but conditional on pattern selectivity, which the tool description does not currently
+  say. Candidate for the system prompt or the tool description; measured, not fixed.
 - **Phase 4 changed what a byte number means — do not compare these rows to the Phase 3 ones.**
   Through Phase 3 the `--verbose` log measured `JSON.stringify` of the structured tool result.
   It now measures what the model actually receives, which for `list_dir`/`grep` is TOON: a real

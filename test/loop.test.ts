@@ -7,7 +7,7 @@ import { MockLanguageModelV4 } from 'ai/test'
 import { runScoutling } from '../src/loop.js'
 import { resolveScopeRoot } from '../src/guardrails.js'
 import { ScoutlingError } from '../src/errors.js'
-import { TOOL_CALL_RESERVATION_BYTES } from '../src/budget.js'
+import { BUDGET_PRESETS, TOOL_CALL_RESERVATION_BYTES } from '../src/budget.js'
 import { createReadFileTool } from '../src/tools/read-file.js'
 
 const scopeRoot = resolveScopeRoot(resolve(import.meta.dirname, 'fixtures/scope'))
@@ -66,6 +66,55 @@ describe('runScoutling', () => {
     // a.txt exists in fixtures/scope with at least 1 line, so it verifies.
     expect(result.citations.verifiedCount).toBe(1)
     expect(result.citations.sources).toContainEqual({ path: 'a.txt', line: 1, verified: true })
+
+    // A normal run that never mis-calls a tool reports zero — the baseline
+    // this field's "1" case (below) is measured against.
+    expect(result.toolCallErrors).toBe(0)
+  })
+
+  it('counts a tool call the SDK rejected before dispatch (unknown tool name) as toolCallErrors: 1', async () => {
+    // AI SDK v7 catches an unrecognized tool name in parseToolCall() before
+    // dispatch and surfaces it to the model as a `tool-error` content part
+    // (no-write.test.ts proves this shape empirically) — the model never
+    // reaches write_file's execute(), there is none. The model here "tries"
+    // write_file on step 1, gets that rejection fed back, then answers.
+    let call = 0
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => {
+        call += 1
+        if (call === 1) {
+          return {
+            content: [
+              {
+                type: 'tool-call' as const,
+                toolCallId: 'call-1',
+                toolName: 'write_file',
+                input: JSON.stringify({ path: 'a.txt', content: 'x' }),
+              },
+            ],
+            finishReason: { unified: 'tool-calls' as const, raw: undefined },
+            usage: usage(),
+            warnings: [],
+          }
+        }
+        return {
+          content: [{ type: 'text' as const, text: 'I have no write tool, so I cannot do that.' }],
+          finishReason: { unified: 'stop' as const, raw: undefined },
+          usage: usage(),
+          warnings: [],
+        }
+      },
+    })
+
+    const result = await runScoutling({
+      question: 'Write to a.txt.',
+      scopeRoot,
+      model,
+      budget: { maxSteps: 5 },
+    })
+
+    expect(result.toolCallErrors).toBe(1)
+    expect(result.stepsUsed).toBe(2)
   })
 
   it('calls list_dir, then grep, then read_file, then answers: toolCalls reflects all three', async () => {
@@ -190,7 +239,7 @@ describe('runScoutling', () => {
     expect(typeof result.answer).toBe('string')
   })
 
-  it('defaults maxSteps to 8 (the normal preset) when not given', async () => {
+  it('defaults maxSteps to the normal preset when not given', async () => {
     const model = new MockLanguageModelV4({
       doGenerate: async () => ({
         content: [
@@ -213,7 +262,12 @@ describe('runScoutling', () => {
       model,
     })
 
-    expect(result.stepsUsed).toBe(8)
+    // Read from the preset rather than pinned to a literal: Phase 6 re-sized
+    // §7's numbers from measurement, and a test that hardcodes one of them
+    // fails for the caps changing rather than for the default breaking. What
+    // this test is actually about is that an absent `budget` resolves to
+    // `normal` at all — `test/budget.test.ts` is where the numbers live.
+    expect(result.stepsUsed).toBe(BUDGET_PRESETS.normal.maxSteps)
     expect(result.exhausted).toBe(true)
   })
 

@@ -13,6 +13,7 @@ function buildResult(overrides: Partial<RunResult> = {}): RunResult {
     usage: { inputTokens: 42, outputTokens: 17 },
     wallMs: 1234,
     toolOutputBytes: 99,
+    toolCallErrors: 0,
     citations: {
       sources: [{ path: 'a.txt', line: 1, verified: true }],
       verifiedCount: 1,
@@ -99,6 +100,7 @@ describe('formatAnswerJson', () => {
         'timedOut',
         'wallMs',
         'toolOutputBytes',
+        'toolCallErrors',
       ].sort(),
     )
   })
@@ -115,6 +117,7 @@ describe('formatAnswerJson', () => {
     expect(parsed.exhausted).toBe(result.exhausted)
     expect(parsed.wallMs).toBe(result.wallMs)
     expect(parsed.toolOutputBytes).toBe(result.toolOutputBytes)
+    expect(parsed.toolCallErrors).toBe(result.toolCallErrors)
     expect(parsed.usage).toEqual(result.usage)
   })
 

@@ -13,31 +13,44 @@ Read, in this order, before changing anything:
 
 ## Status — read this first
 
-**Phases 1-4 of DESIGN.md §13 are done and green. Phase 5 (the eval harness) is next.**
+**Phases 1-5 of DESIGN.md §13 are done and green, plus Phase 6's preset re-sizing.** What remains
+in Phase 6 is running the reference eval across the four models and grading it.
 
 Shipping today: `config.ts` (six layers + provenance), `provider.ts` (+ `listModels`),
 `guardrails.ts`, `scope-walk.ts`, all three tools (`tools/read-file.ts`, `tools/list-dir.ts`,
 `tools/grep.ts`, assembled by `tools/index.ts`), `prompt.ts`, `loop.ts` (`runScoutling`),
-`budget.ts`, `citations.ts`, `toon.ts`, `output.ts`, `commands.ts`, `cli.ts` (`runCli`,
-injectable I/O), `script/smoke.ts`. **296 hermetic tests, 18 files.** CI is green on
-ubuntu/macos/windows × node 22/24, and `pnpm smoke` passes live on `qwen/qwen3-coder-next`.
+`budget.ts`, `citations.ts`, `toon.ts`, `output.ts`, `commands.ts`, `run-setup.ts`
+(`buildRunInputs`), `classify-run-error.ts`, `cli.ts` (`runCli`, injectable I/O),
+`script/smoke.ts`, and `eval/run-eval.ts` (`pnpm eval`). **326 hermetic tests, 20 files.** CI is
+green on ubuntu/macos/windows × node 22/24, and `pnpm smoke` passes live on
+`qwen/qwen3-coder-next` **on the shipped defaults** — it no longer needs `--budget deep` or
+`--timeout-ms`.
 
-Two Phase 4 follow-ups landed after the phase closed: the byte budget no longer lets a step's
-**parallel** tool calls past the cap (it was reproducibly 14x over), and `grep` takes
-`contextLines` so a run can read the code around a hit for ~540 bytes instead of a 17.7 KB
-whole-file read. `NEXT_STEP.md` says what to pick up first.
+**Phase 5 shipped the eval harness**: `eval/run-eval.ts` (`runEval(io)` returns an exit code and
+never calls `process.exit`, mirroring `runCli`; `runQuestion`, `writeResultFile`, `now` and
+`fetch` are all injectable, which is how it gets 23 hermetic tests), `eval/questions.example.json`,
+`docs/eval.md`, and the nine seed questions at `local-ai/docs/scoutling-eval.json`. Results land in
+`eval/results/` (gitignored) as one JSON per model plus a markdown summary. It is deliberately
+**not** in CI — no hosted runner can reach the reference machine's LM Studio.
 
-The whole CLI contract of DESIGN.md §9 now exists: `--budget quick|normal|deep` with
-`--max-steps` / `--max-tool-bytes` / `--timeout-ms` overriding individual caps, `--format
-text|json`, `--require-citations`, `scoutling models`, `scoutling doctor`, and `scoutling -` for
-a question on stdin.
+**Phase 6's preset re-sizing is done**, ahead of grading rather than after it, so no eval cell is
+measured against a preset that was a guess. §7's numbers now come from measuring 266 real code
+files and 187 markdown files across two repositories. Both premises the re-sizing was queued under
+turned out to be wrong — see DESIGN §7 and `docs/dogfood-log.md`, but in short: a default
+`read_file` page is 3-7 KB at the median (17 KB is the p90, not the norm), and `quick`'s real
+defect was that its cap *equalled* `TOOL_CALL_RESERVATION_BYTES`, so a parallel pair of tool calls
+marked the run exhausted immediately. The reservation itself stayed at 16 000; lowering it makes
+worst-case overshoot worse, not better.
 
-**Phase 5 adds** `eval/run-eval.ts`, `eval/questions.example.json` and `docs/eval.md`, plus the
-nine seed questions written to `local-ai/docs/scoutling-eval.json`. Phase 6 then runs that eval
-across the four reference models and **tunes the §7 preset numbers from the results** — they are
-still DESIGN's original guesses, and `normal` already looks marginal (see `docs/dogfood-log.md`:
-the smoke question needs 6 steps and 33 KB when it goes well, against caps of 8 and 40 KB, and
-one run spent all 8 steps without writing an answer).
+**What Phase 6 still owes:** run the eval across the four reference models (all four ids
+re-verified present in LM Studio on 2026-08-28), grade it, pick the model the README recommends,
+and re-tune the presets a second time against `stepsUsed`/bytes measured over four models rather
+than one.
+
+The whole CLI contract of DESIGN.md §9 exists: `--budget quick|normal|deep` with `--max-steps` /
+`--max-tool-bytes` / `--timeout-ms` overriding individual caps, `--format text|json`,
+`--require-citations`, `scoutling models`, `scoutling doctor`, and `scoutling -` for a question on
+stdin.
 
 ## Rules
 
@@ -131,6 +144,15 @@ These cost real time to discover; the type checker does not catch the first two.
 - `data.path` in `--json` output can be `{bytes}` rather than `{text}` for a non-UTF-8 path;
   skip such a record instead of crashing. One `match` record with several `submatches` is still
   one matching *line* — do not emit it twice.
+- **ripgrep skips hidden files and directories unless `--hidden` is passed, and `grep.ts` does
+  not pass it.** `scope-walk.ts` (behind `list_dir`) has no hidden-file rule of its own, so the
+  two tools disagree in exactly the way `--no-require-git` was added to prevent: in a scope with
+  a non-gitignored `.claude/`, `list_dir` lists the file, `read_file` reads it, and `grep` cannot
+  find a single string in it. Verified by running the binary both ways against `local-ai`. **Not
+  fixed** — the fix direction is a real decision (widen `grep` and inherit `.git/`, or narrow the
+  walk and hide `.github/`), written up in DESIGN.md §15. Until it is settled, do not assume a
+  scope's dotfiles are searchable, and do not write an eval question whose answer lives under
+  one.
 
 ## Conventions already established in code — match them
 

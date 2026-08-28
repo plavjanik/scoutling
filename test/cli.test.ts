@@ -454,6 +454,7 @@ describe('runCli', () => {
         'sources',
         'stepsUsed',
         'timedOut',
+        'toolCallErrors',
         'toolCalls',
         'toolOutputBytes',
         'usage',

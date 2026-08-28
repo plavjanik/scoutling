@@ -50,6 +50,12 @@ export interface RunResult {
   /** Cumulative bytes charged by `ToolOutputBudget` — Phase 6 tunes the budget presets from these numbers. */
   toolOutputBytes: number
   /**
+   * Tool calls the SDK rejected before dispatch — an unknown tool name, or
+   * arguments that failed the schema. DESIGN.md §12 records this per run:
+   * tool-call parse failure is the failure mode that separates small models.
+   */
+  toolCallErrors: number
+  /**
    * DESIGN.md §8's cited-answer contract, checked here rather than by every
    * caller: it is a filesystem check against `options.scopeRoot` with no
    * model call, so it belongs to the run's own report, computed exactly
@@ -69,6 +75,25 @@ function countToolCalls(
     }
   }
   return counts
+}
+
+/**
+ * Count `tool-error` content parts across every step — the shape
+ * `no-write.test.ts` proves the SDK produces for an unrecognized tool name or
+ * a call whose arguments fail the tool's schema, caught in `parseToolCall()`
+ * before dispatch (AI SDK v7). This is *not* the same as a tool's own
+ * `{error, message, hint?}` refusal object, which is a normal `tool-result`
+ * the model asked for and got — a `tool-error` part means the SDK itself
+ * rejected the call before any tool code ran at all.
+ */
+function countToolCallErrors(steps: Array<{ content: Array<{ type: string }> }>): number {
+  let count = 0
+  for (const step of steps) {
+    for (const part of step.content) {
+      if (part.type === 'tool-error') count += 1
+    }
+  }
+  return count
 }
 
 /**
@@ -198,6 +223,7 @@ export async function runScoutling(options: RunOptions): Promise<RunResult> {
     },
     wallMs,
     toolOutputBytes: toolOutputBudget.spent,
+    toolCallErrors: countToolCallErrors(result.steps),
     citations,
   }
 }

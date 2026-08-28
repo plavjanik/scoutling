@@ -57,7 +57,8 @@ doctor` exits nonzero when it finds a problem, so it is worth one run when anyth
 # Locate something, then read the cited lines yourself.
 scoutling "Where is the scope-root containment check implemented?" --model qwen/qwen3-coder-next
 
-# Give a wide-ranging question more room than the `normal` budget's 8 steps / 40 KB.
+# Give a wide-ranging question more room than the `normal` budget's 12 steps / 80 KB.
+# (`deep` is 24 steps / 200 KB — it wants a model context of 64 k or more.)
 scoutling "Map the tools and how they are assembled" --model qwen/qwen3-coder-next --budget deep
 
 # Machine-readable, and fail rather than return an answer that cites nothing checkable.

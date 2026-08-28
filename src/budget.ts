@@ -11,11 +11,68 @@ export interface Budget {
   maxOutputTokens: number
 }
 
-/** DESIGN.md §7's table, verbatim. `normal` is the default until a run says otherwise. */
+/**
+ * DESIGN.md §7's table, verbatim. `normal` is the default until a run says otherwise.
+ *
+ * **Re-sized in Phase 6 from measurement, replacing DESIGN's original
+ * guesses** (see `docs/dogfood-log.md` for the raw distributions). Every
+ * number below is charged the way `ToolOutputBudget` charges it — what the
+ * model receives, TOON for `list_dir`/`grep` — measured over 266 real code
+ * files and 187 markdown files across two repositories:
+ *
+ * | call                        | median | p75     | p90     | max     |
+ * |-----------------------------|--------|---------|---------|---------|
+ * | `read_file` default (400ln) | 3-7 KB | 7-14 KB | 15-18 KB| 32 KB   |
+ * | `read_file` `limit: 120`    | 3-5 KB | 5 KB    | 6 KB    | 7 KB    |
+ * | `list_dir`                  | 0.1 KB | 0.4 KB  | 0.6 KB  | 0.7 KB  |
+ * | `grep` `contextLines: 0`    | 8-10 KB| 10 KB   | 12 KB   | 14 KB   |
+ * | `grep` `contextLines: 3`    | 23-33KB| 41-60KB | 43-60KB | 60 KB   |
+ *
+ * Two things that changes. First, the premise this re-sizing was queued
+ * under — "a default `read_file` page measures 17.3 KB, larger than the
+ * whole `quick` budget" — was one file (this repo's largest source file),
+ * not the typical one: 17 KB is the **p90**, and 81-91 % of real reads come
+ * in under 16 KB. `quick` could afford several median reads all along.
+ * Second, and actually worse, the old `quick` cap equalled
+ * `TOOL_CALL_RESERVATION_BYTES` exactly, so `admit` let exactly **one**
+ * concurrent call through and marked the run exhausted the moment a model
+ * issued a parallel pair — concurrency was switched off for that preset by
+ * accident rather than by choice. Re-sizing the caps fixes that without
+ * touching the reservation (see `TOOL_CALL_RESERVATION_BYTES`), and
+ * `test/budget.test.ts` is the gate that keeps it from coming back.
+ *
+ * The caps are therefore sized against observed *runs*, not single calls:
+ *
+ * - **`quick`** — one lookup: a `grep` (~10 KB) plus two p90 reads (~15 KB
+ *   each) ≈ 40 KB. Below that, "find it and read it" does not fit.
+ * - **`normal`** — 2.4x the largest observed useful run (33 KB of tool
+ *   output, 6 steps). At the old 40 KB that same question exhausted at
+ *   34.9 KB and wrote **no answer at all** (`docs/dogfood-log.md`), which is
+ *   what a cap sized against a single call rather than a run buys you.
+ * - **`deep`** — 2.5x `normal`, for a survey that has to cross many files.
+ *
+ * Steps rise with them: the observed useful runs took 4-6 steps and the one
+ * observed failure spent all 8 without answering, so `quick` gets grep +
+ * two reads + an answer with slack, and `normal` gets 2x the observed run.
+ *
+ * Timeouts are sized as `maxSteps × 40 s + 90 s` — 40 s per step and 90 s of
+ * JIT cold load, both observed on the reference machine (a 6-step run of the
+ * smoke question takes ~3.5 minutes on `qwen/qwen3-coder-next`). They are a
+ * backstop against a hang, not a cost control; steps and bytes are the cost
+ * control. A timeout that fires throws away every step the run completed
+ * (DESIGN.md §15), so sizing one tight trades a bounded cost for a total
+ * loss. The old `normal` 180 s was *less* than that observed 3.5-minute run,
+ * which is why `script/smoke.ts` had to pass `--timeout-ms` to keep a
+ * healthy endpoint from looking broken.
+ *
+ * `maxOutputTokens` rises for `quick` because 4 000 truncates a
+ * reasoning-capable local model mid-think, and a step that truncates before
+ * emitting its tool call is a step spent on nothing (DESIGN.md §7).
+ */
 export const BUDGET_PRESETS: Record<BudgetPreset, Budget> = {
-  quick: { maxSteps: 4, maxToolOutputBytes: 16_000, timeoutMs: 90_000, maxOutputTokens: 4_000 },
-  normal: { maxSteps: 8, maxToolOutputBytes: 40_000, timeoutMs: 180_000, maxOutputTokens: 10_000 },
-  deep: { maxSteps: 15, maxToolOutputBytes: 120_000, timeoutMs: 420_000, maxOutputTokens: 16_000 },
+  quick: { maxSteps: 6, maxToolOutputBytes: 40_000, timeoutMs: 300_000, maxOutputTokens: 8_000 },
+  normal: { maxSteps: 12, maxToolOutputBytes: 80_000, timeoutMs: 600_000, maxOutputTokens: 12_000 },
+  deep: { maxSteps: 24, maxToolOutputBytes: 200_000, timeoutMs: 1_200_000, maxOutputTokens: 16_000 },
 }
 
 export function isBudgetPreset(value: unknown): value is BudgetPreset {
@@ -64,12 +121,35 @@ const BUDGET_EXHAUSTED_REFUSAL = {
  * concurrent sibling sees the hold instead of a still-zero settled spend.
  *
  * Sized from a real measurement, not a guess: `read_file`'s default 400-line
- * page of a real source file (`src/tools/grep.ts`) measures ~17-18 KB, so a
- * single default read is roughly the realistic worst case a reservation has
- * to anticipate. This constant is deliberately a little under that: it is a
- * concurrency throttle, not a per-call cap, and CLAUDE.md's own "never
- * degrade silently" rule already commits this file to stating the residual
+ * page measures ~15-18 KB at the p90 across 266 real code files (the full
+ * distribution is in `BUDGET_PRESETS`), so a single default read of a large
+ * file is roughly the realistic worst case a reservation has to anticipate.
+ * A typical read is far smaller — median 3-7 KB — so most calls over-reserve
+ * and `settle` hands the difference back. The tail that does not is the
+ * point: this is a concurrency throttle, not a per-call cap, and CLAUDE.md's
+ * "never degrade silently" rule commits this file to stating the residual
  * honestly rather than pretending a fixed reservation makes every call fit.
+ *
+ * **The reservation and the caps together decide how many tool calls a step
+ * may run in parallel** (DESIGN.md §13 item 6), because `admit` refuses once
+ * settled spend plus outstanding holds reach the cap. Phase 6 re-tuned the
+ * two together and **left this constant where Phase 4 put it** — the value
+ * was never the problem; the *pairing* was. The old `quick` cap was 16 000,
+ * exactly equal to this reservation, so `quick` admitted a single call and
+ * then declared the run exhausted the moment a model issued a parallel pair.
+ * Concurrency was switched off for that preset by arithmetic accident. With
+ * §7's re-sized caps the same constant admits 3 calls under `quick`, 5 under
+ * `normal` and 13 under `deep`.
+ *
+ * Lowering it does not simply buy more parallelism, which is why it stayed.
+ * Worst-case overshoot is (calls admitted) x (a call's real size), so a
+ * smaller reservation lets *more* oversized calls through the same window:
+ * measured against a 32 KB read (the largest observed), 16 000 holds the
+ * worst case to 2.0-2.4x a cap, where 12 000 gives 2.7-3.2x and 10 000 gives
+ * 3.2x across the board — for one extra concurrent call under `quick`. Going
+ * the other way, 20 000 would drop `quick` back to 2 concurrent calls.
+ * `test/budget.test.ts` pins both ends of that trade so the next tuner has
+ * to state a new parallelism out loud rather than drift into one.
  */
 export const TOOL_CALL_RESERVATION_BYTES = 16_000
 
