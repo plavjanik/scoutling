@@ -9,6 +9,7 @@ import { tool, type Tool } from 'ai'
 import { isProbablyBinary, resolvePath } from '../guardrails.js'
 import { walkScope } from '../scope-walk.js'
 import { ScoutlingError } from '../errors.js'
+import { toonModelOutput } from '../toon.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -442,6 +443,11 @@ export function createGrepTool(
       'Returns matching lines with file and 1-based line number. Prefer this over reading whole ' +
       'files when you only need to find where something occurs.',
     inputSchema,
+    // DESIGN.md §6: grep's result is tabular (`{file,line,text}[]`), so the
+    // model sees it as TOON rather than JSON. The typed return value below
+    // (and every refusal shape) is unchanged — this only governs how
+    // `execute`'s result is rendered into the model-facing prompt.
+    toModelOutput: ({ output }) => toonModelOutput(output),
     execute: async ({
       pattern,
       path = '.',

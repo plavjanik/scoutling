@@ -5,6 +5,7 @@ import { tool, type Tool } from 'ai'
 import { resolvePath } from '../guardrails.js'
 import { ScoutlingError } from '../errors.js'
 import { walkScope } from '../scope-walk.js'
+import { toonModelOutput } from '../toon.js'
 
 /** Entries beyond this are cut off; the caller gets a truncation note instead of an unbounded reply. */
 const MAX_ENTRIES = 500
@@ -97,6 +98,11 @@ export function createListDirTool(
       'List the entries (files and subdirectories) of a directory in the scope, optionally ' +
       'several levels deep and filtered by glob.',
     inputSchema,
+    // DESIGN.md §6: list_dir's result is tabular (`{name,type,size}[]`), so
+    // the model sees it as TOON rather than JSON. The typed return value
+    // below (and every refusal shape) is unchanged — this only governs how
+    // `execute`'s result is rendered into the model-facing prompt.
+    toModelOutput: ({ output }) => toonModelOutput(output),
     execute: async ({
       path = DEFAULT_PATH,
       depth = DEFAULT_DEPTH,
@@ -146,9 +152,6 @@ export function createListDirTool(
         size: entry.size,
       }))
 
-      // Phase 4 wraps this result in TOON per DESIGN.md §6; Phase 3 (this
-      // slice) returns plain JSON, so don't mistake the absence for an
-      // oversight.
       if (entries.length === 0) {
         const note = glob === undefined ? 'directory is empty' : `no entries matching ${glob} under ${path}`
         return { path, entries, note }

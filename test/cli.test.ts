@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -67,6 +67,34 @@ describe('parseArgs', () => {
 
   it('rejects a non-integer --max-steps like 2.5', () => {
     expect(() => parseArgs(['a question', '--max-steps', '2.5'])).toThrow(ScoutlingError)
+  })
+
+  it('parses --budget as a string, unvalidated at this layer', () => {
+    const args = parseArgs(['a question', '--budget', 'deep'])
+    expect(args.budget).toBe('deep')
+  })
+
+  it('parses --max-tool-bytes as a number', () => {
+    const args = parseArgs(['a question', '--max-tool-bytes', '20000'])
+    expect(args.maxToolBytes).toBe(20000)
+  })
+
+  it('rejects --max-tool-bytes 0', () => {
+    expect(() => parseArgs(['a question', '--max-tool-bytes', '0'])).toThrow(ScoutlingError)
+    try {
+      parseArgs(['a question', '--max-tool-bytes', '0'])
+    } catch (error) {
+      expect((error as ScoutlingError).code).toBe('BAD_ARGS')
+    }
+  })
+
+  it('parses --timeout-ms as a number', () => {
+    const args = parseArgs(['a question', '--timeout-ms', '5000'])
+    expect(args.timeoutMs).toBe(5000)
+  })
+
+  it('rejects --timeout-ms abc (non-integer)', () => {
+    expect(() => parseArgs(['a question', '--timeout-ms', 'abc'])).toThrow(ScoutlingError)
   })
 
   it('parses --help with no question required', () => {
@@ -204,6 +232,59 @@ describe('runCli', () => {
     expect(exitCode).toBe(2)
     const error = JSON.parse(io.stderr.join(''))
     expect(error.error).toBe('BAD_ARGS')
+  })
+
+  it('exits BAD_ARGS (2) for an unknown --budget preset passed as a flag, before any network call', async () => {
+    const io = captureIO()
+    let fetchCalled = false
+    const fetchImpl = (async () => {
+      fetchCalled = true
+      throw new Error('should never be called')
+    }) as unknown as typeof fetch
+
+    const exitCode = await runCli({
+      argv: ['a question', '--model', 'x', '--budget', 'nonsense'],
+      fetch: fetchImpl,
+      writeStdout: io.writeStdout,
+      writeStderr: io.writeStderr,
+    })
+
+    expect(exitCode).toBe(2)
+    const error = JSON.parse(io.stderr.join(''))
+    expect(error.error).toBe('BAD_ARGS')
+    expect(error.message).toContain('quick')
+    expect(error.message).toContain('normal')
+    expect(error.message).toContain('deep')
+    expect(fetchCalled).toBe(false)
+  })
+
+  it('exits BAD_ARGS (2) for an unknown "budget" value in scoutling.config.json, before any network call', async () => {
+    const scopeRoot = mkdtempSync(join(tmpdir(), 'scoutling-cli-budget-config-'))
+    try {
+      writeFileSync(join(scopeRoot, 'scoutling.config.json'), JSON.stringify({ budget: 'nonsense' }))
+
+      const io = captureIO()
+      let fetchCalled = false
+      const fetchImpl = (async () => {
+        fetchCalled = true
+        throw new Error('should never be called')
+      }) as unknown as typeof fetch
+
+      const exitCode = await runCli({
+        argv: ['a question', '--model', 'x', '--path', scopeRoot],
+        fetch: fetchImpl,
+        writeStdout: io.writeStdout,
+        writeStderr: io.writeStderr,
+      })
+
+      expect(exitCode).toBe(2)
+      const error = JSON.parse(io.stderr.join(''))
+      expect(error.error).toBe('BAD_ARGS')
+      expect(error.message).toContain('nonsense')
+      expect(fetchCalled).toBe(false)
+    } finally {
+      rmSync(scopeRoot, { recursive: true, force: true })
+    }
   })
 
   it('honours --max-steps: a model that keeps calling tools is cut off at exactly that many steps', async () => {

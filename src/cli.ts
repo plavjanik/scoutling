@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import { APICallError, RetryError } from 'ai'
 
+import { isBudgetPreset, resolveBudget } from './budget.js'
 import { loadConfig } from './config.js'
 import { ScoutlingError } from './errors.js'
 import { resolvePath, resolveScopeRoot } from './guardrails.js'
@@ -14,23 +15,28 @@ import type { ScoutlingConfig } from './types.js'
 const USAGE = `🐦 scoutling — read-only, bounded codebase investigation with list_dir, grep and read_file.
 
 scoutling "<question>" --model <id> [--path <dir>] [--base-url <url>] [--api-key <key>]
-          [--max-steps <n>] [--verbose]
+          [--budget quick|normal|deep] [--max-steps <n>] [--max-tool-bytes <n>] [--timeout-ms <n>]
+          [--verbose]
 scoutling --help
 
 Runs a bounded, read-only investigation of the directory tree at --path (default: the current
 directory) and prints a cited answer to stdout.
 
-  --model <id>        Model to run, e.g. qwen/qwen3-coder-next. Required (flag, env, or config).
-  --path <dir>        Scope root — the only directory the run can see. Default: cwd.
-  --base-url <url>    OpenAI-compatible endpoint. Default: http://localhost:1234/v1.
-  --api-key <key>     Sent as a Bearer token. Default: not-needed (fine for LM Studio/Ollama).
-  --max-steps <n>     Maximum tool-call steps before the run stops and reports exhausted. Default: 8.
-  --verbose           Log one line per step to stderr (tool name, args, bytes returned).
-  --help              Print this message and exit 0.
+  --model <id>          Model to run, e.g. qwen/qwen3-coder-next. Required (flag, env, or config).
+  --path <dir>          Scope root — the only directory the run can see. Default: cwd.
+  --base-url <url>      OpenAI-compatible endpoint. Default: http://localhost:1234/v1.
+  --api-key <key>       Sent as a Bearer token. Default: not-needed (fine for LM Studio/Ollama).
+  --budget <preset>     quick, normal or deep — sets maxSteps/maxToolBytes/timeoutMs together. Default: normal.
+  --max-steps <n>       Maximum tool-call steps before the run stops and reports exhausted. Overrides --budget.
+  --max-tool-bytes <n>  Cumulative tool-output byte cap before further tool calls are refused. Overrides --budget.
+  --timeout-ms <n>      Whole-run wall-clock timeout, including model load. Overrides --budget.
+  --verbose             Log one line per step to stderr (tool name, args, bytes returned).
+  --help                Print this message and exit 0.
 
 Examples:
   scoutling "Where is resolvePath defined?" --model qwen/qwen3-coder-next
-  scoutling "What does this repo do?" --path ../other-repo --model qwen/qwen3-next-80b --verbose`
+  scoutling "What does this repo do?" --path ../other-repo --model qwen/qwen3-next-80b --verbose
+  scoutling "Survey the auth module" --model qwen/qwen3-next-80b --budget deep`
 
 export interface ParsedArgs {
   help: boolean
@@ -40,7 +46,11 @@ export interface ParsedArgs {
   path?: string
   baseUrl?: string
   apiKey?: string
+  /** Validated against `isBudgetPreset` later, once merged with config-file/env sources — not here. */
+  budget?: string
   maxSteps?: number
+  maxToolBytes?: number
+  timeoutMs?: number
 }
 
 const FLAGS_WITH_VALUE = {
@@ -48,10 +58,15 @@ const FLAGS_WITH_VALUE = {
   '--path': 'path',
   '--base-url': 'baseUrl',
   '--api-key': 'apiKey',
+  '--budget': 'budget',
 } as const
 
 /** Flags parsed via this table get a genuine number, not a string forced through the string-keyed table above. */
-const NUMERIC_FLAGS = { '--max-steps': 'maxSteps' } as const
+const NUMERIC_FLAGS = {
+  '--max-steps': 'maxSteps',
+  '--max-tool-bytes': 'maxToolBytes',
+  '--timeout-ms': 'timeoutMs',
+} as const
 
 const BOOLEAN_FLAGS = {
   '--verbose': 'verbose',
@@ -212,6 +227,11 @@ export async function runCli(io: CliIO): Promise<number> {
     ...(args.model !== undefined ? { model: args.model } : {}),
     ...(args.baseUrl !== undefined ? { baseUrl: args.baseUrl } : {}),
     ...(args.apiKey !== undefined ? { apiKey: args.apiKey } : {}),
+    // Not validated as a real BudgetPreset here — parseArgs only knows it
+    // received a string. isBudgetPreset checks it below, alongside
+    // config.budget from every other layer (a config file, SCOUTLING_BUDGET),
+    // none of which validate it at load time either.
+    ...(args.budget !== undefined ? { budget: args.budget as ScoutlingConfig['budget'] } : {}),
   }
 
   const { config, warnings } = loadConfig({
@@ -221,6 +241,16 @@ export async function runCli(io: CliIO): Promise<number> {
   })
 
   for (const warning of warnings) writeStderr(`warning: ${warning}\n`)
+
+  if (!isBudgetPreset(config.budget)) {
+    return emitError(
+      new ScoutlingError(
+        'BAD_ARGS',
+        `--budget must be one of quick, normal, deep; got: ${config.budget}`,
+        'Valid presets: quick, normal, deep.',
+      ),
+    )
+  }
 
   if (!config.model) {
     let hint: string
@@ -265,6 +295,12 @@ export async function runCli(io: CliIO): Promise<number> {
   })
   const model = provider.chatModel(config.model)
 
+  const budget = resolveBudget(config.budget, {
+    ...(args.maxSteps !== undefined ? { maxSteps: args.maxSteps } : {}),
+    ...(args.maxToolBytes !== undefined ? { maxToolOutputBytes: args.maxToolBytes } : {}),
+    ...(args.timeoutMs !== undefined ? { timeoutMs: args.timeoutMs } : {}),
+  })
+
   try {
     const result = await runScoutling({
       question: args.question as string,
@@ -273,7 +309,7 @@ export async function runCli(io: CliIO): Promise<number> {
       temperature: config.temperature,
       systemPrompt,
       excludeGlobs: config.excludeGlobs,
-      ...(args.maxSteps !== undefined ? { maxSteps: args.maxSteps } : {}),
+      budget,
       ...(args.verbose ? { onStep: (step: StepSummary) => writeStderr(`${formatStepLog(step)}\n`) } : {}),
     })
 
