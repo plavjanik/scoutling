@@ -390,9 +390,18 @@ recommend as a starting point"* — not *"is local delegation as good as Sonnet"
    *"there was more"*, not *"we reached the cap"*; the walk takes one entry past the limit to
    tell those apart, because the flag becomes a "narrow your search" hint and a false one sends
    a small model chasing a listing that was already complete.
-4. **Budget + citations + TOON + JSON** — `budget.ts` presets and byte accounting,
-   `citations.ts` + `--require-citations`, TOON encoding of `list_dir`/`grep`, `--format json`,
-   `scoutling models`, `scoutling doctor`, stdin question.
+4. ~~**Budget + citations + TOON + JSON**~~ — **DONE 2026-08-28.** `budget.ts` presets and
+   cumulative byte accounting, `citations.ts` + `--require-citations`, TOON encoding of
+   `list_dir`/`grep` via the SDK's `toModelOutput`, `--format json`, `scoutling models`,
+   `scoutling doctor`, stdin question. 283 hermetic tests, 18 files.
+   *Learned:* the byte budget has to measure what the model actually **receives**, not the
+   structured result — a fixture listing is 239 bytes as JSON and 125 as TOON, so charging the
+   JSON would have spent the budget almost twice as fast as the model spends context, and
+   `--verbose` reporting a different number than `--max-tool-bytes` enforces would have made the
+   preset untunable. Both now read the budget's own accounting. Also: a bare `path` is not a
+   citation (§8) — measured, not assumed. And two bugs that only running the commands found: a
+   run that spends its whole step budget on tool calls printed a **blank** answer, and `doctor`
+   reported "no problems found" for a config with no model, which cannot run anything at all.
 5. **Eval harness** — `run-eval.ts`, example questions, `docs/eval.md`; write
    `local-ai/docs/scoutling-eval.json` with the 9 seeds.
 6. **Run the reference eval** across the 4 models, grade, pick the recommended model, tune

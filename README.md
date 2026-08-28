@@ -9,14 +9,18 @@ local model (LM Studio, Ollama, vLLM — any OpenAI-compatible endpoint) reads, 
 repo within a hard step and byte budget and reports back with `path:line` citations. It cannot write.
 The expensive model only ever reads the conclusion.
 
-**Status: design complete, implementation in progress.** This npm name is reserved; the first
-usable release will be `0.1.0`. Read [DESIGN.md](./DESIGN.md) for the full design, competitive
-landscape and roadmap.
+**Status: working, not yet published.** Phases 1-4 of the roadmap are done — the tools, the
+budget, the cited-answer contract and the full CLI all run today. What is left before `0.1.0` is
+the eval across several local models, the numbers it produces, and the integration docs. Read
+[DESIGN.md](./DESIGN.md) for the full design, competitive landscape and roadmap.
 
 ```sh
-# soon
+# after 0.1.0 is published
 npx scoutling "Where is the retry logic for image generation, and what does it back off on?" \
   --model qwen/qwen3-next-80b --path .
+
+# what this actually returns
+scoutling "Where is the scope-root containment check?" --model qwen/qwen3-coder-next --format json
 ```
 
 ## Why

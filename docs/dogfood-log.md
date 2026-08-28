@@ -30,6 +30,8 @@ Verdict is one of:
 | 2026-08-28 | scoutling | "Where is the guard that stops a grep pattern being parsed as a ripgrep flag, and what does it do?" | qwen/qwen3-coder-next | 5/8 | no | useful | **First run of a question Phase 2 could not answer at all** — no file named, so it had to find one. grep → two parallel reads → paged read → read DESIGN.md → answered. All six citations (`grep.ts:206`, `grep.ts:177-188`, and three test line ranges) verified exact by hand. ~33 KB of tool output, 3m20s. |
 | 2026-08-28 | scoutling | "How does walkScope decide a listing was truncated, and why is it done that way?" | qwen/qwen3-coder-next | 4/8 | no | useful | grep → full read of `scope-walk.ts` → paged read of its test → answered. Explained the limit+1 ceiling correctly, including *why*, and found the mirrored comment in `grep.ts` unprompted. All five citations verified exact. ~22 KB of tool output. |
 | 2026-08-28 | scoutling | "What does resolvePath do when a path points outside the scope root?" | qwen/qwen3-coder-next | 4/8 | no | useful | First run on Phase 4: `--format json --require-citations`, exit 0. grep -> read `guardrails.ts` -> read its test -> answered. 16.1 KB of tool output, 1m54s. Both verified citations hand-checked exact (`guardrails.ts:46` is the signature; `:69-70` are the message and hint it quotes). 6 of 8 extracted sources came back unverifiable, and only 4 of those are model errors -- see the citation-noise observation below. |
+| 2026-08-28 | scoutling | "Where is the guard that stops a grep pattern being parsed as a ripgrep flag?" (smoke) | qwen/qwen3-coder-next | 8/8 | **yes** | gave up | First run under `--require-citations`, `normal` budget. Spent all 8 steps exploring (2 extra greps and a `list_dir` into `docs/adr`) and wrote no answer at all. 34.9 KB of 40 KB, so *steps* bound here, not bytes. Exit 1 with both warning lines. |
+| 2026-08-28 | scoutling | same question, `--budget deep` | qwen/qwen3-coder-next | 6/15 | no | useful | 32.8 KB, 125 s, 3 of 6 sources verified. `grep.ts:207` is exactly the `['-e', pattern, '--', searchTarget]` guard; hand-checked. This is what the question actually costs: inside `normal`'s caps, but with almost no headroom. |
 
 ## Open observations
 
@@ -40,17 +42,14 @@ Verdict is one of:
   therefore not directly comparable to the 22 KB and 33 KB above it — part of the drop is TOON,
   part is the measurement changing under it. Phase 6 should tune the preset caps from Phase 4
   numbers only, and re-measure on a scope larger than this repo.
-- **Citation extraction picks up example paths from prose.** In the Phase 4 run the model's
-  answer listed the paths a *rejected* traversal would use (`../../etc/passwd`, `/etc/passwd`)
-  as illustrations, and the extractor reported them as unverifiable sources — they were never
-  claims about the code. It also caught two genuine model errors, where the answer cited
-  `test:60-67` instead of naming the test file. The `Sources:` line therefore reads worse than
-  the answer deserves (2 verified, 6 unverifiable) even though the answer was correct and both
-  verified citations were exact. DESIGN.md §8 specifies extracting bare `path` tokens as well as
-  `path:line`; restricting extraction to citations that carry a line number would have dropped
-  both false positives and kept both true ones. Worth deciding with Phase 5's question set
-  rather than from one run.
-
+- **Citation extraction picked up example paths from prose — fixed 2026-08-28.** In the first
+  Phase 4 run the model listed the paths a *rejected* traversal would use (`../../etc/passwd`)
+  as illustrations, and the extractor reported them as unverifiable sources. Later runs added
+  `[...flags, path/operand]` from a quoted code snippet and `0002/0004` from "ADR 0002/0004".
+  A correct smoke answer read `Sources: 2 verified, 4 unverifiable`. Citations now require a
+  line number (DESIGN.md §8, updated to match): the same smoke answer reads `Sources: 4
+  verified`, and no true citation was lost in any observed run. Extraction still admits a
+  non-citation that happens to be shaped `word:digits`, so keep watching the ratio.
 - **This repo is a weak dogfood scope.** At ~2,400 lines it fits in a parent agent's context
   whole, so scoutling will often score *unnecessary* here through no fault of its own. The
   scopes that actually exercise it are `local-ai` (also where the nine eval questions live) and

@@ -13,22 +13,26 @@ Read, in this order, before changing anything:
 
 ## Status — read this first
 
-**Phases 1-3 of DESIGN.md §13 are done and green. Phase 4 is next.**
+**Phases 1-4 of DESIGN.md §13 are done and green. Phase 5 (the eval harness) is next.**
 
 Shipping today: `config.ts` (six layers + provenance), `provider.ts` (+ `listModels`),
 `guardrails.ts`, `scope-walk.ts`, all three tools (`tools/read-file.ts`, `tools/list-dir.ts`,
 `tools/grep.ts`, assembled by `tools/index.ts`), `prompt.ts`, `loop.ts` (`runScoutling`),
-`cli.ts` (`runCli`, injectable I/O), `script/smoke.ts`. **161 hermetic tests, 12 files.** CI is
-green on ubuntu/macos/windows × node 22/24.
+`budget.ts`, `citations.ts`, `toon.ts`, `output.ts`, `commands.ts`, `cli.ts` (`runCli`,
+injectable I/O), `script/smoke.ts`. **283 hermetic tests, 18 files.** CI is green on
+ubuntu/macos/windows × node 22/24, and `pnpm smoke` passes live on `qwen/qwen3-coder-next`.
 
-A run finally has a **discovery tool**, so "where is X?" no longer has to name its file — that
-was Phase 2's single biggest limitation and the reason dogfooding starts now, not earlier. The
-default step cap is 8 (DESIGN.md §7's `normal` preset), overridable with `--max-steps`.
+The whole CLI contract of DESIGN.md §9 now exists: `--budget quick|normal|deep` with
+`--max-steps` / `--max-tool-bytes` / `--timeout-ms` overriding individual caps, `--format
+text|json`, `--require-citations`, `scoutling models`, `scoutling doctor`, and `scoutling -` for
+a question on stdin.
 
-**Phase 4 adds** `budget.ts` (presets + cumulative tool-output byte accounting), `citations.ts`
-+ `--require-citations`, TOON encoding of the `list_dir`/`grep` results (both return plain JSON
-today, with a comment at each return site saying Phase 4 owns it), `--format json`,
-`scoutling models`, `scoutling doctor`, and reading the question from stdin.
+**Phase 5 adds** `eval/run-eval.ts`, `eval/questions.example.json` and `docs/eval.md`, plus the
+nine seed questions written to `local-ai/docs/scoutling-eval.json`. Phase 6 then runs that eval
+across the four reference models and **tunes the §7 preset numbers from the results** — they are
+still DESIGN's original guesses, and `normal` already looks marginal (see `docs/dogfood-log.md`:
+the smoke question needs 6 steps and 33 KB when it goes well, against caps of 8 and 40 KB, and
+one run spent all 8 steps without writing an answer).
 
 ## Rules
 
@@ -81,6 +85,25 @@ These cost real time to discover; the type checker does not catch the first two.
   test runs. When most of a file is mocked but one test needs the real thing (as in
   `grep-injection.test.ts`), use the non-hoisted `vi.doUnmock(...)` inside the `it()` body,
   then `vi.resetModules()` and re-import the module dynamically.
+- **`toModelOutput` exists and is what TOON rides on.** It is declared on `Tool` in
+  `@ai-sdk/provider-utils` (not re-exported into `ai`'s own `index.d.ts`, so searching there
+  finds nothing) and is invoked by `createToolModelOutput` in `ai/dist/index.js`. `list_dir` and
+  `grep` use it to render TOON while their `execute` keeps returning the typed structured
+  result — which is why the tool tests never had to learn TOON. Returning `{type:'text', …}`
+  from it also means a tool result reaches the model as text; the default (no `toModelOutput`)
+  is `{type:'json'}`. A test that asserts the result part is `type: 'text'` therefore proves the
+  rendering ran.
+- **`AbortSignal.timeout()`'s timer is unref'd** (verified on the installed Node): a 180 s run
+  budget does not keep the CLI alive after it has answered. `generateText` surfaces the abort as
+  an `Error`/`DOMException` named `AbortError` or `TimeoutError` depending on how the signal was
+  made, so `loop.ts` checks `signal.aborted` *and* the name rather than assuming either.
+  `MockLanguageModelV4` does no abort handling of its own — its `doGenerate` must react to
+  `options.abortSignal` itself, exactly as a real provider's `fetch` would.
+- **`@toon-format/toon`'s `encode` renders an `undefined`-valued key as `key: null`** rather than
+  dropping it the way `JSON.stringify` does, so `toon.ts` strips those first — otherwise an
+  optional `note`/`hint` set to `undefined` would tell the model the field exists and is null.
+  `encode` also throws on a string containing an unpaired UTF-16 surrogate, which is the one
+  input that defeats it while `JSON.stringify` still succeeds.
 
 ## ripgrep — verified against the installed 15.0.0 (`@vscode/ripgrep` 1.18), do not re-derive
 
@@ -121,8 +144,22 @@ These cost real time to discover; the type checker does not catch the first two.
 - **Never degrade silently.** The JS search fallback runs only when the ripgrep binary is
   genuinely missing; every other ripgrep failure is a refusal, and the result always carries
   `engine`. Answering with a weaker engine without saying so is how a wrong answer looks right.
+- **Bytes mean what the model receives.** The byte budget and the `--verbose` step log both read
+  `ToolOutputBudget`'s own accounting, which measures the rendered `toModelOutput` (TOON for
+  `list_dir`/`grep`) rather than `JSON.stringify` of the structured result — 239 bytes of JSON
+  is 125 of TOON for one fixture listing. If those two ever measure different things again, a
+  caller tuning `--max-tool-bytes` from a `--verbose` run is reading numbers that do not apply,
+  and the §7 presets become untunable.
+- **`{"error"}` is fatal, `{"warning"}` is not.** A one-line JSON `error` on stderr maps to an
+  exit code and means the run failed. A `warning` (`BUDGET_EXHAUSTED`, `NO_VERIFIED_CITATIONS`)
+  means it answered but the caller should know something. Never merge the two shapes — telling
+  "degraded answer" from "no answer" is the whole point.
+- **Definitive empty states, including the answer itself.** A run can spend every step on tool
+  calls and produce no text; text mode says which budget stopped it rather than printing a blank
+  line. `doctor` counts an unrunnable config (no model) as a finding, not as "no problems found".
 - Emoji (🐦) on human-facing surfaces only: README, DESIGN, npm description, `--help`. Never on
-  stdout answers, the one-line JSON errors or the `--verbose` step log — parent agents parse those.
+  stdout answers, the one-line JSON errors or warnings, the `--format json` object, or the
+  `--verbose` step log — parent agents parse those.
 - Toolchain reality: **vitest 4** (not ^2), **tsdown needs Node ^22.18 || >=24.11 to build**, and
   `@vscode/ripgrep` 1.18 ships per-platform optional deps rather than a postinstall download.
 
