@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import { randomUUID } from 'node:crypto'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
@@ -246,6 +247,121 @@ describe('runCli', () => {
     const error = JSON.parse(io.stderr.join(''))
     expect(error.error).toBe('PATH_NOT_FOUND')
     expect(io.stdout).toEqual([])
+  })
+
+  describe('relative --path resolves against the injected cwd, not process.cwd()', () => {
+    // A citation to a marker file that only exists under the injected `cwd`
+    // proves *which* directory the scope root actually resolved to: if the
+    // code fell back to process.cwd() (the real cwd this test process is
+    // running from — the scoutling repo root), the marker file would not
+    // exist there and the citation would come back unverified. A random
+    // suffix keeps the marker path from ever colliding with a real repo path.
+    const markerName = `only-under-injected-cwd-${randomUUID()}.txt`
+
+    it('a relative --path under the injected cwd resolves there, not exit 5', async () => {
+      const injectedCwd = mkdtempSync(join(tmpdir(), 'scoutling-cli-relpath-cwd-'))
+      const relativeSubdir = `relative-scope-${randomUUID()}`
+      try {
+        const subdirAbsolute = join(injectedCwd, relativeSubdir)
+        mkdirSync(subdirAbsolute)
+        writeFileSync(join(subdirAbsolute, markerName), 'marker\n')
+
+        const io = captureIO()
+        const fetchImpl = (async () =>
+          textCompletionResponse(`The marker is here (${markerName}:1).`)) as unknown as typeof fetch
+
+        const exitCode = await runCli({
+          argv: ['a question', '--model', 'a-model', '--path', relativeSubdir, '--format', 'json'],
+          cwd: injectedCwd,
+          fetch: fetchImpl,
+          writeStdout: io.writeStdout,
+          writeStderr: io.writeStderr,
+        })
+
+        expect(exitCode).toBe(0)
+        const parsed = JSON.parse(io.stdout.join(''))
+        const source = parsed.sources.find((s: { path: string }) => s.path === markerName)
+        expect(source).toBeDefined()
+        expect(source.verified).toBe(true)
+      } finally {
+        rmSync(injectedCwd, { recursive: true, force: true })
+      }
+    })
+
+    it('an absolute --path still works unchanged, regardless of the injected cwd', async () => {
+      const injectedCwd = mkdtempSync(join(tmpdir(), 'scoutling-cli-relpath-cwd-'))
+      const absoluteScope = mkdtempSync(join(tmpdir(), 'scoutling-cli-abspath-scope-'))
+      try {
+        writeFileSync(join(absoluteScope, markerName), 'marker\n')
+
+        const io = captureIO()
+        const fetchImpl = (async () =>
+          textCompletionResponse(`The marker is here (${markerName}:1).`)) as unknown as typeof fetch
+
+        const exitCode = await runCli({
+          argv: ['a question', '--model', 'a-model', '--path', absoluteScope, '--format', 'json'],
+          cwd: injectedCwd,
+          fetch: fetchImpl,
+          writeStdout: io.writeStdout,
+          writeStderr: io.writeStderr,
+        })
+
+        expect(exitCode).toBe(0)
+        const parsed = JSON.parse(io.stdout.join(''))
+        const source = parsed.sources.find((s: { path: string }) => s.path === markerName)
+        expect(source).toBeDefined()
+        expect(source.verified).toBe(true)
+      } finally {
+        rmSync(injectedCwd, { recursive: true, force: true })
+        rmSync(absoluteScope, { recursive: true, force: true })
+      }
+    })
+
+    it('a relative --path that exists under neither still gives PATH_NOT_FOUND / exit 5', async () => {
+      const injectedCwd = mkdtempSync(join(tmpdir(), 'scoutling-cli-relpath-cwd-'))
+      try {
+        const io = captureIO()
+        const exitCode = await runCli({
+          argv: ['a question', '--model', 'a-model', '--path', `nowhere-${randomUUID()}`],
+          cwd: injectedCwd,
+          writeStdout: io.writeStdout,
+          writeStderr: io.writeStderr,
+        })
+
+        expect(exitCode).toBe(5)
+        const error = JSON.parse(io.stderr.join(''))
+        expect(error.error).toBe('PATH_NOT_FOUND')
+      } finally {
+        rmSync(injectedCwd, { recursive: true, force: true })
+      }
+    })
+
+    it('no --path still defaults to the injected cwd', async () => {
+      const injectedCwd = mkdtempSync(join(tmpdir(), 'scoutling-cli-relpath-cwd-'))
+      try {
+        writeFileSync(join(injectedCwd, markerName), 'marker\n')
+
+        const io = captureIO()
+        const fetchImpl = (async () =>
+          textCompletionResponse(`The marker is here (${markerName}:1).`)) as unknown as typeof fetch
+
+        const exitCode = await runCli({
+          argv: ['a question', '--model', 'a-model', '--format', 'json'],
+          cwd: injectedCwd,
+          fetch: fetchImpl,
+          writeStdout: io.writeStdout,
+          writeStderr: io.writeStderr,
+        })
+
+        expect(exitCode).toBe(0)
+        const parsed = JSON.parse(io.stdout.join(''))
+        const source = parsed.sources.find((s: { path: string }) => s.path === markerName)
+        expect(source).toBeDefined()
+        expect(source.verified).toBe(true)
+      } finally {
+        rmSync(injectedCwd, { recursive: true, force: true })
+      }
+    })
   })
 
   it('exits BAD_ARGS (2) for a missing --model, and its message includes the live model list', async () => {

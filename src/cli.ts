@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { isAbsolute, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { isBudgetPreset, resolveBudget } from './budget.js'
@@ -327,9 +328,17 @@ export async function runCli(io: CliIO): Promise<number> {
     args.question = trimmed
   }
 
+  // resolveScopeRoot resolves a relative path against process.cwd(), not the
+  // injected `cwd` — so a relative --path must be made absolute against the
+  // effective cwd *here*, before it reaches resolveScopeRoot, or a
+  // programmatic caller whose process.cwd() differs from the injected cwd
+  // (a test, a script, an embedding agent) gets a scope root resolved
+  // against the wrong directory. An absolute --path and the no-path default
+  // (already cwd) both pass through unchanged.
   let scopeRoot: string
   try {
-    scopeRoot = resolveScopeRoot(args.path ?? cwd)
+    const scopeRootInput = args.path === undefined || isAbsolute(args.path) ? (args.path ?? cwd) : resolve(cwd, args.path)
+    scopeRoot = resolveScopeRoot(scopeRootInput)
   } catch (error) {
     return emitError(error instanceof ScoutlingError ? error : new ScoutlingError('INTERNAL', String(error)))
   }
