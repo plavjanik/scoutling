@@ -13,39 +13,67 @@ Read, in this order, before changing anything:
 
 ## Status — read this first
 
-**Phases 1-5 of DESIGN.md §13 are done and green, plus Phase 6's preset re-sizing.** What remains
-in Phase 6 is running the reference eval across the four models and grading it.
+**Phases 1-5 of DESIGN.md §13 are done and green. Phase 6 is in progress:** the preset re-sizing
+is done and the first reference-eval model has been run. What remains is the other three models,
+grading, and a second preset re-tune — which the first model's numbers already say is needed.
 
 Shipping today: `config.ts` (six layers + provenance), `provider.ts` (+ `listModels`),
-`guardrails.ts`, `scope-walk.ts`, all three tools (`tools/read-file.ts`, `tools/list-dir.ts`,
-`tools/grep.ts`, assembled by `tools/index.ts`), `prompt.ts`, `loop.ts` (`runScoutling`),
-`budget.ts`, `citations.ts`, `toon.ts`, `output.ts`, `commands.ts`, `run-setup.ts`
-(`buildRunInputs`), `classify-run-error.ts`, `cli.ts` (`runCli`, injectable I/O),
-`script/smoke.ts`, and `eval/run-eval.ts` (`pnpm eval`). **326 hermetic tests, 20 files.** CI is
-green on ubuntu/macos/windows × node 22/24, and `pnpm smoke` passes live on
-`qwen/qwen3-coder-next` **on the shipped defaults** — it no longer needs `--budget deep` or
-`--timeout-ms`.
+`guardrails.ts`, `scope-walk.ts` (+ the shared `isPathVisible`/`explainPathExclusion`), all three
+tools (`tools/read-file.ts`, `tools/list-dir.ts`, `tools/grep.ts`, assembled by `tools/index.ts`),
+`prompt.ts`, `loop.ts` (`runScoutling`), `budget.ts`, `citations.ts`, `toon.ts`, `output.ts`,
+`commands.ts`, `run-setup.ts`, `classify-run-error.ts`, `cli.ts` (`runCli`, injectable I/O),
+`script/smoke.ts`, and `eval/run-eval.ts` (`pnpm eval`). **382 hermetic tests, 21 files.**
+`pnpm smoke` passes live on `qwen/qwen3-coder-next` **on the shipped defaults** — it no longer
+needs `--budget deep` or `--timeout-ms`.
 
-**Phase 5 shipped the eval harness**: `eval/run-eval.ts` (`runEval(io)` returns an exit code and
-never calls `process.exit`, mirroring `runCli`; `runQuestion`, `writeResultFile`, `now` and
-`fetch` are all injectable, which is how it gets 23 hermetic tests), `eval/questions.example.json`,
-`docs/eval.md`, and the nine seed questions at `local-ai/docs/scoutling-eval.json`. Results land in
-`eval/results/` (gitignored) as one JSON per model plus a markdown summary. It is deliberately
-**not** in CI — no hosted runner can reach the reference machine's LM Studio.
+### Phase 6 so far
 
-**Phase 6's preset re-sizing is done**, ahead of grading rather than after it, so no eval cell is
-measured against a preset that was a guess. §7's numbers now come from measuring 266 real code
-files and 187 markdown files across two repositories. Both premises the re-sizing was queued under
-turned out to be wrong — see DESIGN §7 and `docs/dogfood-log.md`, but in short: a default
-`read_file` page is 3-7 KB at the median (17 KB is the p90, not the norm), and `quick`'s real
-defect was that its cap *equalled* `TOOL_CALL_RESERVATION_BYTES`, so a parallel pair of tool calls
-marked the run exhausted immediately. The reservation itself stayed at 16 000; lowering it makes
-worst-case overshoot worse, not better.
+**The presets were re-sized from measurement** (§7 carries the table and the derivation; the raw
+distributions are in `docs/dogfood-log.md`). Both premises that work was queued under were wrong:
+a default `read_file` page is 3-7 KB at the median, not 17 KB (that is the p90, measured from one
+file), and `quick`'s real defect was that its cap *equalled* `TOOL_CALL_RESERVATION_BYTES`, so a
+parallel pair of tool calls marked the run exhausted at once. The reservation stayed at 16 000 —
+lowering it admits more oversized calls through the same window and makes worst-case overshoot
+worse, not better.
 
-**What Phase 6 still owes:** run the eval across the four reference models (all four ids
-re-verified present in LM Studio on 2026-08-28), grade it, pick the model the README recommends,
-and re-tune the presets a second time against `stepsUsed`/bytes measured over four models rather
-than one.
+**Then the first eval model was run** (`qwen/qwen3-coder-next`, 9 questions x 3 runs against
+`local-ai`, 51 min wall). **`normal` is still too small: 15 of 26 completed runs (57 %) exhausted,
+and 7 of the 9 questions exhausted at least once.**
+
+| question | mean/max steps (cap 12) | mean/max bytes (cap 80 k) | mean wall | exhausted |
+|---|---|---|---|---|
+| book-sweep-strategy-count | 3/3 | 17.7 k / 17.7 k | 16 s | 0/3 |
+| backtest-runner-header | 7/7 | 24.2 k / 25.3 k | 29 s | 0/3 |
+| candidate-hunter-layers | 9/12 | 80.8 k / 89.8 k | 242 s | **3/3** |
+| form4-ticker-count | 8/8 | 86.5 k / 86.5 k | 259 s | **2/2** |
+| pipeline-stages | 10/11 | 86.2 k / 86.2 k | 286 s | **3/3** |
+| scoring-model | 6/6 | 67.2 k / 67.2 k | 100 s | 0/3 |
+| strategy-tournament | 11/12 | 77.0 k / 85.6 k | 75 s | **3/3** |
+| mcp-server-boundary | 11/12 | 35.0 k / 35.9 k | 43 s | 1/3 |
+| learn-glossary-system | 12/12 | 58.8 k / 67.8 k | 58 s | **3/3** |
+
+Three things to carry into the re-tune, none of them guesses any more:
+
+- **Both caps bind, on the same question.** `candidate-hunter-layers` exhausted on *bytes* twice
+  (88-90 KB) and on *steps* once (12/12 at only 64 KB), depending on the path the model took.
+  `learn-glossary-system` and `strategy-tournament` bind on steps at well under the byte cap.
+  Raising one without the other just moves which cap fires.
+- **The earlier re-sizing was validated on the wrong shape of question.** It was checked against
+  scoutling's own smoke question — 6 steps, 45 KB, well-targeted — which does not resemble a
+  question that has to *derive* a value across a large repo (dedupe 145 `WATCHLIST` entries,
+  subtract 6 `coverage:"quotes"` ones). That class is where `normal` fails.
+- **A timeout still costs the whole cell.** `form4-ticker-count` run 2 hit the 600 s wall and
+  returned nothing at all, because `generateText` rejects on abort and every completed step is
+  discarded (DESIGN.md §15, deferred from Phase 4). It is no longer theoretical: it has now eaten
+  a real eval run.
+
+**And `auto: pass` is not a verdict, demonstrated:** `form4-ticker-count` scored `auto: pass` on
+both completed runs with **zero verified citations** — the answer contained the right numbers and
+symbol names while citing nothing that resolves against the scope. That is exactly why
+`docs/eval.md` keeps the `correct?` column empty and human. Grade by reading, not by the column.
+
+**Do not change the presets mid-sweep.** The remaining three models have to run at the same caps
+or the cells are not comparable; re-tune after, then re-run.
 
 The whole CLI contract of DESIGN.md §9 exists: `--budget quick|normal|deep` with `--max-steps` /
 `--max-tool-bytes` / `--timeout-ms` overriding individual caps, `--format text|json`,
