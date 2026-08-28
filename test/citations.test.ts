@@ -35,9 +35,9 @@ describe('extractCitations', () => {
   })
 
   it('extracts the label of a markdown link, not the URL', () => {
-    expect(extractCitations('See [src/x.ts](https://example.com/blob/src/x.ts) for details.')).toEqual([
-      { path: 'src/x.ts' },
-    ])
+    expect(
+      extractCitations('See [src/x.ts:12](https://example.com/blob/src/x.ts) for details.'),
+    ).toEqual([{ path: 'src/x.ts', line: 12 }])
   })
 
   it('does not capture a trailing sentence period', () => {
@@ -101,10 +101,35 @@ describe('extractCitations', () => {
     expect(extractCitations('Some tools, e.g. ripgrep, are bundled; i.e. not installed.')).toEqual([])
   })
 
-  it('still accepts a one-letter extension when a slash or a line number backs it up', () => {
-    expect(extractCitations('See src/main.c and main.c:12.')).toEqual([
-      { path: 'src/main.c' },
+  it('accepts a one-letter extension, with and without a directory', () => {
+    expect(extractCitations('See src/main.c:3 and main.c:12.')).toEqual([
+      { path: 'src/main.c', line: 3 },
       { path: 'main.c', line: 12 },
+    ])
+  })
+
+  it('ignores a path-shaped token that carries no line number', () => {
+    // A citation is `path:line` by the system prompt's own contract, so a bare
+    // path is not evidence of anything. Extracting it anyway is what produced
+    // "Sources: 2 verified, 4 unverifiable" on a correct smoke answer.
+    expect(extractCitations('The guard lives in src/tools/grep.ts somewhere.')).toEqual([])
+  })
+
+  it('ignores code and prose fragments that merely contain a slash', () => {
+    // All three observed in real Phase 4 runs: a spread in a quoted code
+    // snippet, a prose pair, and a reference to two ADRs by number.
+    expect(
+      extractCitations('The argv is [...flags, path/operand] and this follows ADR 0002/0004.'),
+    ).toEqual([])
+  })
+
+  it('ignores an example path quoted in prose, such as a traversal attempt', () => {
+    expect(extractCitations('A candidate like ../../etc/passwd is rejected.')).toEqual([])
+  })
+
+  it('still extracts the same path once it carries a line number', () => {
+    expect(extractCitations('The guard is at src/tools/grep.ts:207.')).toEqual([
+      { path: 'src/tools/grep.ts', line: 207 },
     ])
   })
 
@@ -114,9 +139,9 @@ describe('extractCitations', () => {
     ).toEqual([{ path: 'src/a.ts', line: 1 }])
   })
 
-  it('treats a bare path and the same path with a line number as distinct sources', () => {
-    expect(extractCitations('See foo.ts and also foo.ts:3.')).toEqual([
-      { path: 'foo.ts' },
+  it('treats two different lines of the same file as distinct sources', () => {
+    expect(extractCitations('See foo.ts:1 and also foo.ts:3.')).toEqual([
+      { path: 'foo.ts', line: 1 },
       { path: 'foo.ts', line: 3 },
     ])
   })
@@ -126,18 +151,23 @@ describe('extractCitations', () => {
   })
 
   it('extracts multiple distinct citations in order of appearance', () => {
-    expect(extractCitations('First src/a.ts:1, then src/b.ts:2-4, then bare c.ts.')).toEqual([
+    expect(
+      extractCitations('First src/a.ts:1, then src/b.ts:2-4, then c.ts:9, and bare d.ts.'),
+    ).toEqual([
       { path: 'src/a.ts', line: 1 },
       { path: 'src/b.ts', line: 2, endLine: 4 },
-      { path: 'c.ts' },
+      { path: 'c.ts', line: 9 },
     ])
   })
 })
 
 describe('verifyCitations', () => {
-  it('verifies a bare path that exists', () => {
+  it('reports no source at all for a bare path, even one that exists', () => {
+    // Existing is not the same as cited: without a line number there is no
+    // claim to check, so the file's existence proves nothing about the answer.
     const report = verifyCitations(fixtureScope, 'See a.txt for details.')
-    expect(report.sources).toEqual([{ path: 'a.txt', verified: true }])
+    expect(report.sources).toEqual([])
+    expect(report.summaryLine).toBe('Sources: none cited')
   })
 
   it('verifies a path:line within the file', () => {
@@ -185,9 +215,9 @@ describe('verifyCitations', () => {
     expect(report.sources).toEqual([{ path: '../../../etc/passwd', line: 1, verified: false }])
   })
 
-  it('verifies a bare citation to a binary file (the file does exist)', () => {
+  it('reports no source for a bare mention of a binary file', () => {
     const report = verifyCitations(fixtureScope, 'See binary.bin for details.')
-    expect(report.sources).toEqual([{ path: 'binary.bin', verified: true }])
+    expect(report.sources).toEqual([])
   })
 
   it('marks a line-numbered citation to a binary file as unverified (cannot count lines)', () => {
@@ -195,20 +225,19 @@ describe('verifyCitations', () => {
     expect(report.sources).toEqual([{ path: 'binary.bin', line: 1, verified: false }])
   })
 
-  it('verifies a bare citation to an oversized file, but not a line-numbered one', () => {
+  it('cannot verify a line-numbered citation to an oversized file', () => {
+    // Past the 2 MB cap there is no line count to check the citation against
+    // without reading the whole file, so the claim stays unverified.
     const scope = tempDir('scoutling-citations-big-')
     writeFileSync(join(scope, 'big.txt'), 'x'.repeat(3 * 1024 * 1024))
-
-    const bareReport = verifyCitations(scope, 'See big.txt for details.')
-    expect(bareReport.sources).toEqual([{ path: 'big.txt', verified: true }])
 
     const lineReport = verifyCitations(scope, 'See big.txt:1 for details.')
     expect(lineReport.sources).toEqual([{ path: 'big.txt', line: 1, verified: false }])
   })
 
   it('verifies a nested path', () => {
-    const report = verifyCitations(fixtureScope, 'See sub/nested.txt for details.')
-    expect(report.sources).toEqual([{ path: 'sub/nested.txt', verified: true }])
+    const report = verifyCitations(fixtureScope, 'See sub/nested.txt:1 for details.')
+    expect(report.sources).toEqual([{ path: 'sub/nested.txt', line: 1, verified: true }])
   })
 
   it('resolves a citation relative to the given scope root, unaffected by other scopes', () => {

@@ -245,9 +245,18 @@ is what made the historical read-only-reviewer runs catch *verifiable* bugs rath
 plausible-sounding ones.
 
 `citations.ts` then, with **no extra model call**:
-1. Extracts every `path(:line(-line)?)?` token from the answer (paths relative to scope root).
+1. Extracts every `path:line` / `path:line-line` token from the answer (paths relative to scope
+   root). **The line number is required.** The original draft of this section also extracted a
+   bare `path`, and Phase 4 measured what that does to real answers: a model that quotes a code
+   snippet (`[...flags, path/operand]`), names two ADRs at once ("ADR 0002/0004") or illustrates
+   a *rejected* input (`../../etc/passwd`) scatters slash-bearing tokens through its prose that
+   were never claims about the code. Every one became an unverifiable source, and one correct
+   smoke answer reported `Sources: 2 verified, 4 unverifiable`. Since the prompt above requires
+   a `path:line` for every factual claim, a bare path is not a citation by this tool's own
+   contract — requiring the line number cost no true positive in any observed run and removed
+   every false one.
 2. Verifies the file exists in scope and the line range is within `totalLines`.
-3. Returns `sources: [{path, line?, endLine?, verified: boolean}]` in JSON output, and in text
+3. Returns `sources: [{path, line, endLine?, verified: boolean}]` in JSON output, and in text
    mode appends a one-line `Sources: 7 verified, 1 unverifiable (lib/foo.ts:999)`.
 
 `--require-citations` makes an answer with zero verified sources exit non-zero. This is the
