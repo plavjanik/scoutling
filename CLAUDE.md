@@ -19,8 +19,13 @@ Shipping today: `config.ts` (six layers + provenance), `provider.ts` (+ `listMod
 `guardrails.ts`, `scope-walk.ts`, all three tools (`tools/read-file.ts`, `tools/list-dir.ts`,
 `tools/grep.ts`, assembled by `tools/index.ts`), `prompt.ts`, `loop.ts` (`runScoutling`),
 `budget.ts`, `citations.ts`, `toon.ts`, `output.ts`, `commands.ts`, `cli.ts` (`runCli`,
-injectable I/O), `script/smoke.ts`. **283 hermetic tests, 18 files.** CI is green on
+injectable I/O), `script/smoke.ts`. **296 hermetic tests, 18 files.** CI is green on
 ubuntu/macos/windows × node 22/24, and `pnpm smoke` passes live on `qwen/qwen3-coder-next`.
+
+Two Phase 4 follow-ups landed after the phase closed: the byte budget no longer lets a step's
+**parallel** tool calls past the cap (it was reproducibly 14x over), and `grep` takes
+`contextLines` so a run can read the code around a hit for ~540 bytes instead of a 17.7 KB
+whole-file read. `NEXT_STEP.md` says what to pick up first.
 
 The whole CLI contract of DESIGN.md §9 now exists: `--budget quick|normal|deep` with
 `--max-steps` / `--max-tool-bytes` / `--timeout-ms` overriding individual caps, `--format
@@ -119,6 +124,10 @@ These cost real time to discover; the type checker does not catch the first two.
   `INVALID_PATTERN` refusal can still rely on reading stderr.
 - Exceeding `maxBuffer` arrives as `code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'` with `killed`
   *undefined*, so it does not collide with the timeout branch (which keys off `killed`).
+- **`-C <n>` adds `{"type":"context"}` records** alongside `{"type":"match"}` in `--json` output,
+  and ripgrep merges overlapping context windows itself — a line that both matches and falls in
+  another match's window is always reported as `match`, never twice. So the ripgrep path needs
+  no dedup logic; the JS fallback does, and has it. Verified by running the binary.
 - `data.path` in `--json` output can be `{bytes}` rather than `{text}` for a non-UTF-8 path;
   skip such a record instead of crashing. One `match` record with several `submatches` is still
   one matching *line* — do not emit it twice.
@@ -138,6 +147,14 @@ These cost real time to discover; the type checker does not catch the first two.
   whereas an interface needs an explicit `[toolName: string]: Tool` index signature, which would
   state that any key may map to a tool and would silence the excess-property check that makes
   adding a write member an error.
+- **Check-then-act around a tool is a bug, not a guard.** The AI SDK runs all of a step's tool
+  calls concurrently, so anything that reads state, `await`s the tool, then writes state is
+  bypassed by every sibling call in the same step — the byte budget did exactly this and went
+  reproducibly 14x over its cap on four parallel `read_file`s. `ToolOutputBudget` now reserves
+  synchronously (`admit`) before running and reconciles after (`settle`, in a `finally`, so a
+  throwing tool releases its hold instead of wedging the run). The reservation size and the
+  preset caps together decide how many calls a step may run in parallel, so they have to be
+  tuned together — see DESIGN.md §13 item 6.
 - **A cap flag means "there was more", not "we reached the limit".** `walkScope` and `grep` both
   collect one item past the cap so they can tell those apart. The flag becomes a "narrow your
   search" hint, and a false one sends a small model chasing a listing that was already complete.

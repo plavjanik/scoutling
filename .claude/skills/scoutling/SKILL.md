@@ -78,6 +78,11 @@ scoutling "How is config precedence resolved?" --model qwen/qwen3-coder-next --v
 - **An open "where is X?" is fair game.** The tool set is `list_dir`, `grep` and `read_file`, so
   the run can find its own way to a file. Naming the file when you already know it is still
   cheaper — it saves a discovery step out of the eight.
+- **`grep` can return surrounding lines** (`contextLines`, 0-10), which is usually how a run
+  should answer "what does this code do" instead of reading a whole file: on this repo a
+  three-line context window costs ~540 bytes against ~17.7 KB for the equivalent `read_file`.
+  The run decides that for itself, but a question phrased as "show me the lines around X" nudges
+  it there.
 - **Ask one question per run.** One question, one answer, one budget.
 - **Ask for citations explicitly** if the answer will drive a change; the built-in prompt
   requires them, and saying so again makes small models comply more reliably. Add

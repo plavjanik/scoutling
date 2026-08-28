@@ -17,6 +17,10 @@ const execFileAsync = promisify(execFile)
 export const DEFAULT_MAX_MATCHES = 100
 /** Hard ceiling regardless of what the model asks for — a small model can request an unbounded amount of context. */
 export const MAX_MAX_MATCHES = 500
+/** Lines of surrounding context returned when the caller doesn't ask for any — unchanged output by default. */
+export const DEFAULT_CONTEXT_LINES = 0
+/** Hard ceiling on `contextLines`: enough to usually avoid a follow-up `read_file`, not enough for a small model to smuggle a near-whole-file read through a single match. */
+export const MAX_CONTEXT_LINES = 10
 /** A minified bundle can put an entire file on one line; truncate so one match can't blow the tool-output budget. */
 export const MAX_MATCH_TEXT_CHARS = 300
 /**
@@ -54,8 +58,16 @@ export interface GrepMatch {
   file: string
   /** 1-based. */
   line: number
-  /** The matching line, trailing newline stripped, truncated to `MAX_MATCH_TEXT_CHARS`. */
+  /** The line's text, trailing newline stripped, truncated to `MAX_MATCH_TEXT_CHARS`. Same truncation for context lines as for matches. */
   text: string
+  /**
+   * Only present when the caller asked for `contextLines > 0` — in which
+   * case *every* row carries it, never a mix (rows must stay uniform for
+   * `toon.ts`'s tabular encoding). Absent entirely at `contextLines: 0` (the
+   * default), which is what keeps that response byte-identical to before
+   * this field existed.
+   */
+  kind?: 'match' | 'context'
 }
 
 export interface GrepResult {
@@ -95,6 +107,17 @@ const inputSchema = z.object({
     .min(1)
     .optional()
     .describe(`Maximum matches to return (default ${DEFAULT_MAX_MATCHES}, max ${MAX_MAX_MATCHES}).`),
+  contextLines: z
+    .number()
+    .int()
+    .min(0)
+    .max(MAX_CONTEXT_LINES)
+    .optional()
+    .describe(
+      `Lines of surrounding context to include around each match (default ${DEFAULT_CONTEXT_LINES}, max ` +
+        `${MAX_CONTEXT_LINES}). Try this before reading a whole file just to see a few lines around a hit — ` +
+        'a nonzero value is usually enough to answer without a follow-up read_file call.',
+    ),
 })
 
 /** Convert a possibly platform-separated path to the POSIX form the `file` field always speaks in. */
@@ -159,6 +182,7 @@ interface BackendArgs {
   caseSensitive: boolean
   excludeGlobs: string[]
   maxMatches: number
+  contextLines: number
 }
 
 type RipgrepOutcome =
@@ -188,10 +212,15 @@ interface RipgrepMatchLine {
  * refactor that reorders this is caught.
  */
 async function runRipgrep(rgPath: string, args: BackendArgs): Promise<RipgrepOutcome> {
-  const { scopeRoot, searchTarget, pattern, glob, caseSensitive, excludeGlobs, maxMatches, displayPath } = args
+  const { scopeRoot, searchTarget, pattern, glob, caseSensitive, excludeGlobs, maxMatches, displayPath, contextLines } =
+    args
 
   const flags: string[] = ['--json', '--line-number', '--no-messages']
   flags.push(caseSensitive ? '-s' : '-i')
+  // Goes in the flags section, well before `-e`/`--`, so it can never be
+  // mistaken for part of the pattern or a path — same placement discipline
+  // as `--glob` and `--no-require-git` below.
+  if (contextLines > 0) flags.push('-C', String(contextLines))
   if (glob !== undefined) flags.push('--glob', glob)
   // .gitignore handling is left to ripgrep's own machinery rather than
   // reimplemented here — it honours .gitignore (and .git/info/exclude,
@@ -285,6 +314,20 @@ async function runRipgrep(rgPath: string, args: BackendArgs): Promise<RipgrepOut
     }
   }
 
+  // Two separate parse paths rather than one parameterised one: contextLines
+  // === 0 is the pre-Phase-4-slice-6 code, completely untouched, so that
+  // path's output is provably byte-identical rather than "identical because
+  // the new branch happens to collapse to the old behaviour."
+  const { matches, truncated } =
+    contextLines > 0
+      ? parseRipgrepWithContext(stdout, maxMatches, contextLines)
+      : parseRipgrepMatchesOnly(stdout, maxMatches)
+
+  return { kind: 'done', value: buildResult(pattern, displayPath, matches, truncated, maxMatches, 'ripgrep') }
+}
+
+/** Original (pre-context) parser: `type: 'match'` records only, one entry per record, no `kind` field. */
+function parseRipgrepMatchesOnly(stdout: string, maxMatches: number): { matches: GrepMatch[]; truncated: boolean } {
   const matches: GrepMatch[] = []
   let truncated = false
 
@@ -325,7 +368,101 @@ async function runRipgrep(rgPath: string, args: BackendArgs): Promise<RipgrepOut
 
   if (truncated) matches.splice(maxMatches)
 
-  return { kind: 'done', value: buildResult(pattern, displayPath, matches, truncated, maxMatches, 'ripgrep') }
+  return { matches, truncated }
+}
+
+/**
+ * `type: 'match'` and `type: 'context'` records, `kind`-tagged.
+ *
+ * ripgrep's own `-C n` windowing already merges overlapping windows and
+ * already reports a line that is both a match and inside another match's
+ * context as `match` (verified empirically: run `rg --json -C 2` against
+ * two matches one line apart — the second is `type: match`, never
+ * `type: context`, even though it falls inside the first match's window).
+ * So this function does not need to recompute merging itself — it only
+ * needs to decide, as records stream past, which side of `maxMatches` each
+ * one falls on.
+ *
+ * That decision is the one place this needs its own state, because leading
+ * context for a match arrives *before* that match's own record. A run of
+ * context records seen while not "inside" a kept match's trailing window is
+ * buffered in `pendingContext` rather than committed immediately; once the
+ * match they precede is confirmed kept, the buffer is flushed as `context`
+ * entries ahead of it. If that match instead turns out to be the one over
+ * `maxMatches`, parsing stops immediately (matching how `runFallback`
+ * below stops, per the frozen contract) and the buffered lines — which
+ * belong only to the excess match, not to the last kept one — are simply
+ * dropped along with it. Without this buffering, a match many lines away
+ * from the last kept one but still within `maxMatches`'s reach in the byte
+ * stream could otherwise leak its own leading context into the response
+ * even though the match itself is never shown.
+ */
+function parseRipgrepWithContext(
+  stdout: string,
+  maxMatches: number,
+  contextLines: number,
+): { matches: GrepMatch[]; truncated: boolean } {
+  const matches: GrepMatch[] = []
+  let matchCount = 0
+  let truncated = false
+  let pendingContext: GrepMatch[] = []
+  let trailingRemaining = 0
+  let currentFile: string | null = null
+
+  for (const line of stdout.split('\n')) {
+    if (line.length === 0) continue
+
+    let parsed: RipgrepMatchLine
+    try {
+      parsed = JSON.parse(line) as RipgrepMatchLine
+    } catch {
+      continue
+    }
+    if (parsed.type !== 'match' && parsed.type !== 'context') continue
+
+    const pathText = parsed.data?.path?.text
+    if (pathText === undefined) continue
+    const lineNumber = parsed.data?.line_number
+    const lineText = parsed.data?.lines?.text
+    if (lineNumber === undefined || lineText === undefined) continue
+
+    const file = stripLeadingDotSlash(toPosixPath(pathText))
+    // Context never spans files, so a file change resets both buffers —
+    // defensive rather than load-bearing, since ripgrep never interleaves
+    // records from two files.
+    if (file !== currentFile) {
+      pendingContext = []
+      trailingRemaining = 0
+      currentFile = file
+    }
+    const text = truncateText(stripTrailingNewline(lineText))
+
+    if (parsed.type === 'match') {
+      if (matchCount + 1 > maxMatches) {
+        truncated = true
+        break
+      }
+      matchCount++
+      // The buffered leading context now provably belongs to a kept match —
+      // commit it, in order, ahead of the match itself.
+      for (const entry of pendingContext) matches.push(entry)
+      pendingContext = []
+      matches.push({ file, line: lineNumber, text, kind: 'match' })
+      // Resets (not accumulates) on every kept match — this is exactly what
+      // extends the window when the next match arrives before the previous
+      // one's trailing budget ran out, merging the two into one run.
+      trailingRemaining = contextLines
+    } else {
+      if (trailingRemaining > 0) {
+        matches.push({ file, line: lineNumber, text, kind: 'context' })
+        trailingRemaining--
+      } else {
+        pendingContext.push({ file, line: lineNumber, text, kind: 'context' })
+      }
+    }
+  }
+
+  return { matches, truncated }
 }
 
 /**
@@ -337,7 +474,8 @@ async function runRipgrep(rgPath: string, args: BackendArgs): Promise<RipgrepOut
  * wall-clock budget so one huge file can't hang the run.
  */
 function runFallback(args: BackendArgs): GrepResult | GrepRefusal {
-  const { scopeRoot, resolvedPath, displayPath, pattern, glob, caseSensitive, excludeGlobs, maxMatches } = args
+  const { scopeRoot, resolvedPath, displayPath, pattern, glob, caseSensitive, excludeGlobs, maxMatches, contextLines } =
+    args
 
   if (pattern.length > MAX_FALLBACK_PATTERN_CHARS) {
     return {
@@ -386,36 +524,110 @@ function runFallback(args: BackendArgs): GrepResult | GrepRefusal {
   const matches: GrepMatch[] = []
   let truncated = false
 
-  fileLoop: for (const filePath of candidateFiles) {
-    let content: Buffer
-    try {
-      content = readFileSync(filePath)
-    } catch {
-      continue
+  if (contextLines === 0) {
+    // Untouched from before context lines existed, so contextLines: 0 (the
+    // default) is provably byte-identical rather than "identical because
+    // the windowed branch happens to collapse to the same thing."
+    fileLoop: for (const filePath of candidateFiles) {
+      let content: Buffer
+      try {
+        content = readFileSync(filePath)
+      } catch {
+        continue
+      }
+      if (isProbablyBinary(content)) continue
+
+      const relFile = toPosixPath(relative(scopeRoot, filePath))
+      const lines = content.toString('utf8').split('\n')
+      const deadline = Date.now() + FALLBACK_PER_FILE_BUDGET_MS
+
+      for (let i = 0; i < lines.length; i++) {
+        // Checked between lines, not once per file, so one file with a huge
+        // number of short lines can't quietly blow past the budget either.
+        if (Date.now() > deadline) break
+
+        const line = lines[i] ?? ''
+        if (!regex.test(line)) continue
+
+        matches.push({ file: relFile, line: i + 1, text: truncateText(line) })
+        if (matches.length >= maxMatches + 1) {
+          truncated = true
+          break fileLoop
+        }
+      }
     }
-    if (isProbablyBinary(content)) continue
 
-    const relFile = toPosixPath(relative(scopeRoot, filePath))
-    const lines = content.toString('utf8').split('\n')
-    const deadline = Date.now() + FALLBACK_PER_FILE_BUDGET_MS
+    if (truncated) matches.splice(maxMatches)
+  } else {
+    // Mirrors `parseRipgrepWithContext`'s windowing exactly (see its doc
+    // comment) so the two engines agree: a sliding `pendingContext` buffer
+    // holds not-yet-committed leading context until the match it precedes
+    // is confirmed kept, and `trailingRemaining` both emits a kept match's
+    // trailing context and — by resetting rather than accumulating on the
+    // next match — merges overlapping windows into one run. Here the
+    // "records" are just every line of the file (ripgrep only hands us
+    // lines already inside some window; the fallback has to look at every
+    // line itself to reach the same conclusion), so a plain-text line is
+    // the direct equivalent of ripgrep's `type: 'context'` record and a
+    // regex match is the equivalent of `type: 'match'`.
+    let matchCount = 0
 
-    for (let i = 0; i < lines.length; i++) {
-      // Checked between lines, not once per file, so one file with a huge
-      // number of short lines can't quietly blow past the budget either.
-      if (Date.now() > deadline) break
+    fileLoop: for (const filePath of candidateFiles) {
+      let content: Buffer
+      try {
+        content = readFileSync(filePath)
+      } catch {
+        continue
+      }
+      if (isProbablyBinary(content)) continue
 
-      const line = lines[i] ?? ''
-      if (!regex.test(line)) continue
+      const relFile = toPosixPath(relative(scopeRoot, filePath))
+      const contentText = content.toString('utf8')
+      const lines = contentText.split('\n')
+      // `"a\n".split('\n')` is `["a", ""]` — a trailing newline manufactures
+      // a fictitious final empty "line" that doesn't exist in the file. The
+      // matches-only path above never notices (an empty string essentially
+      // never matches a real pattern), but as *trailing context* of a match
+      // on the real last line it would otherwise surface as a bogus extra
+      // row ripgrep — which knows the file's true line count — never emits.
+      const lineCount = contentText.endsWith('\n') ? lines.length - 1 : lines.length
+      const deadline = Date.now() + FALLBACK_PER_FILE_BUDGET_MS
+      // Reset per file: context never spans files.
+      let pendingContext: GrepMatch[] = []
+      let trailingRemaining = 0
 
-      matches.push({ file: relFile, line: i + 1, text: truncateText(line) })
-      if (matches.length >= maxMatches + 1) {
-        truncated = true
-        break fileLoop
+      for (let i = 0; i < lineCount; i++) {
+        if (Date.now() > deadline) break
+
+        const line = lines[i] ?? ''
+        const text = truncateText(line)
+
+        if (regex.test(line)) {
+          if (matchCount + 1 > maxMatches) {
+            truncated = true
+            break fileLoop
+          }
+          matchCount++
+          for (const entry of pendingContext) matches.push(entry)
+          pendingContext = []
+          matches.push({ file: relFile, line: i + 1, text, kind: 'match' })
+          trailingRemaining = contextLines
+        } else if (trailingRemaining > 0) {
+          matches.push({ file: relFile, line: i + 1, text, kind: 'context' })
+          trailingRemaining--
+        } else {
+          // Bounded ring buffer: only the most recent `contextLines` lines
+          // can ever be needed as leading context of a future match, so an
+          // older entry is dropped rather than kept around indefinitely —
+          // this is what stops a long run of non-matching lines between two
+          // distant matches from leaking irrelevant "context" into the
+          // result once the second match is reached.
+          pendingContext.push({ file: relFile, line: i + 1, text, kind: 'context' })
+          if (pendingContext.length > contextLines) pendingContext.shift()
+        }
       }
     }
   }
-
-  if (truncated) matches.splice(maxMatches)
 
   return buildResult(pattern, displayPath, matches, truncated, maxMatches, 'fallback')
 }
@@ -441,7 +653,8 @@ export function createGrepTool(
     description:
       'Search file contents in the scope with a regular expression (ripgrep/Rust regex syntax). ' +
       'Returns matching lines with file and 1-based line number. Prefer this over reading whole ' +
-      'files when you only need to find where something occurs.',
+      'files when you only need to find where something occurs — and set contextLines to pull a ' +
+      'few lines of surrounding code into the same result instead of following up with read_file.',
     inputSchema,
     // DESIGN.md §6: grep's result is tabular (`{file,line,text}[]`), so the
     // model sees it as TOON rather than JSON. The typed return value below
@@ -454,11 +667,15 @@ export function createGrepTool(
       glob,
       caseSensitive = false,
       maxMatches = DEFAULT_MAX_MATCHES,
+      contextLines = DEFAULT_CONTEXT_LINES,
     }): Promise<GrepResult | GrepRefusal> => {
       // Clamped here as well as in the schema: a local model can still emit
       // an out-of-range value the schema's `.min(1)` alone wouldn't cap from
       // above, or (via a looser client) skip validation entirely.
       const clampedMaxMatches = Math.min(Math.max(Math.trunc(maxMatches), 1), MAX_MAX_MATCHES)
+      // Same precedent as maxMatches — a negative value clamps to 0 (i.e. no
+      // context, the default), not an error.
+      const clampedContextLines = Math.min(Math.max(Math.trunc(contextLines), 0), MAX_CONTEXT_LINES)
 
       let resolvedPath: string
       try {
@@ -490,6 +707,7 @@ export function createGrepTool(
         caseSensitive,
         excludeGlobs,
         maxMatches: clampedMaxMatches,
+        contextLines: clampedContextLines,
       }
 
       const rgOutcome = await runRipgrep(rgPath, backendArgs)

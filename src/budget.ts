@@ -52,25 +52,88 @@ const BUDGET_EXHAUSTED_REFUSAL = {
   hint: 'Do not call more tools; state explicitly what you could not verify.',
 } as const
 
-/** Tracks cumulative tool-output bytes charged during one run against a fixed cap. */
+/**
+ * Held while one call is in flight, before its real size is known.
+ *
+ * The AI SDK runs every tool call belonging to one step concurrently, so
+ * `wrapTool` cannot wait for a call's real output before deciding whether the
+ * *next* concurrent call may proceed — by the time any call has measured and
+ * posted its size, every other call in the same step has already read
+ * `spentBytes` and found it unchanged. `admit`/`settle` close that window by
+ * reserving this many bytes synchronously, before a call runs, so a
+ * concurrent sibling sees the hold instead of a still-zero settled spend.
+ *
+ * Sized from a real measurement, not a guess: `read_file`'s default 400-line
+ * page of a real source file (`src/tools/grep.ts`) measures ~17-18 KB, so a
+ * single default read is roughly the realistic worst case a reservation has
+ * to anticipate. This constant is deliberately a little under that: it is a
+ * concurrency throttle, not a per-call cap, and CLAUDE.md's own "never
+ * degrade silently" rule already commits this file to stating the residual
+ * honestly rather than pretending a fixed reservation makes every call fit.
+ */
+export const TOOL_CALL_RESERVATION_BYTES = 16_000
+
+/**
+ * Tracks tool-output bytes for one run against a fixed cap, admitting calls
+ * before they run and reconciling the estimate against reality afterwards.
+ *
+ * This bounds concurrent overshoot; it does not eliminate it. Reserving a
+ * fixed amount up front stops an unbounded number of parallel calls from all
+ * slipping through the same "not exhausted yet" window (a real repro: four
+ * parallel `read_file` calls against a 5 KB cap once charged 71,084 bytes —
+ * 14x the cap — under the old check-then-charge-after design), but it cannot
+ * make the cap inviolable. A single call's real output can still exceed its
+ * reservation (see `TOOL_CALL_RESERVATION_BYTES`'s own residual), and one
+ * call whose real output is larger than the whole cap will always exceed it
+ * — no pre-flight estimate can shrink a call's real result after the fact.
+ */
 export class ToolOutputBudget {
   private readonly limitBytes: number
   private spentBytes = 0
+  private reservedBytes = 0
+  private refusalCount = 0
 
   constructor(limitBytes: number) {
     this.limitBytes = limitBytes
   }
 
+  /** Settled bytes only — in-flight reservations are not "spent" until `settle`. */
   get spent(): number {
     return this.spentBytes
   }
 
   get exhausted(): boolean {
-    return this.spentBytes >= this.limitBytes
+    // Settled spend reaching the cap is the obvious case. The refusal count
+    // is the trap: with reservations, a call can be refused while
+    // `spentBytes` alone is still comfortably under the cap — e.g. 35 KB
+    // settled plus a 16 KB hold against a 40 KB limit. Reporting
+    // `exhausted: false` there would tell the caller its answer drew on the
+    // full evidence budget when a call was in fact turned away.
+    return this.spentBytes >= this.limitBytes || this.refusalCount > 0
   }
 
-  charge(bytes: number): void {
-    this.spentBytes += bytes
+  /**
+   * Admit a call and hold `reservationBytes` while it runs, or refuse.
+   *
+   * Refuses whenever what is already committed — settled spend plus any
+   * other call's outstanding hold — has reached the cap. Checked and
+   * incremented synchronously (no `await` before the reservation is added),
+   * so two calls invoked back-to-back before either has run see each other's
+   * hold rather than both reading the same stale "not exhausted" state.
+   */
+  admit(reservationBytes: number): boolean {
+    if (this.spentBytes + this.reservedBytes >= this.limitBytes) {
+      this.refusalCount += 1
+      return false
+    }
+    this.reservedBytes += reservationBytes
+    return true
+  }
+
+  /** Release the hold and record what the call actually cost (0 for a call that never produced a measurable result). */
+  settle(reservationBytes: number, actualBytes: number): void {
+    this.reservedBytes -= reservationBytes
+    this.spentBytes += actualBytes
   }
 }
 
@@ -95,16 +158,22 @@ async function measureModelBytes(toolDef: Tool, toolCallId: string, input: unkno
 }
 
 /**
- * Wrap one tool's `execute` so every real call is charged to `budget`
- * afterwards, and no call runs at all once the budget is already exhausted.
+ * Wrap one tool's `execute` so every real call reserves its worst-case bytes
+ * before running and reconciles that reservation against its real size
+ * afterwards, refusing outright rather than executing once the budget is
+ * already committed.
  *
- * Deliberately charges *after* execution, using the call's own output size,
- * rather than refusing pre-emptively based on an estimate: the call that
- * happens to tip the budget over still ran and still returns its real
- * result in full — only the *next* call is refused. Punishing the call that
- * crossed the line would waste a real tool round trip whose result the
- * model has already been told (via the refusal on the call after it) not to
- * expect any more of.
+ * The call that happens to tip the budget over still ran and still returns
+ * its real result in full — only the *next* call is refused. Punishing the
+ * call that crossed the line would waste a real tool round trip whose result
+ * the model has already been told (via the refusal on the call after it) not
+ * to expect any more of.
+ *
+ * `settle` runs in `finally` with `actualBytes` defaulting to 0: a call
+ * whose `execute` or byte measurement throws still releases its reservation
+ * instead of leaking it, which would otherwise wedge the budget — every
+ * later call in the run would see a phantom hold that can never be spent —
+ * for the rest of the run.
  */
 function wrapTool(toolDef: Tool, budget: ToolOutputBudget): Tool {
   const originalExecute = toolDef.execute
@@ -113,12 +182,16 @@ function wrapTool(toolDef: Tool, budget: ToolOutputBudget): Tool {
   return {
     ...toolDef,
     execute: async (input, options) => {
-      if (budget.exhausted) return BUDGET_EXHAUSTED_REFUSAL
+      if (!budget.admit(TOOL_CALL_RESERVATION_BYTES)) return BUDGET_EXHAUSTED_REFUSAL
 
-      const output = await originalExecute(input, options)
-      const bytes = await measureModelBytes(toolDef, options.toolCallId, input, output)
-      budget.charge(bytes)
-      return output
+      let actualBytes = 0
+      try {
+        const output = await originalExecute(input, options)
+        actualBytes = await measureModelBytes(toolDef, options.toolCallId, input, output)
+        return output
+      } finally {
+        budget.settle(TOOL_CALL_RESERVATION_BYTES, actualBytes)
+      }
     },
   }
 }

@@ -195,7 +195,7 @@ is it using that model?" is a one-command answer. `scoutling init` (v1.1) append
 |---|---|---|
 | `read_file` | `{path, offset?, limit? (default 400, max 2000)}` | Line-numbered plain text (prose/code isn't tabular → not TOON). Returns `totalLines` so the model paginates instead of re-reading. Binary-sniffs and refuses. Files > 2 MB refused with a hint. |
 | `list_dir` | `{path=".", depth? (1–3), glob?}` | `{name,type,size}[]`, **TOON-encoded**. Honors `.gitignore` + `excludeGlobs`. Cap 500 entries with a truncation note. |
-| `grep` | `{pattern, path=".", glob?, caseSensitive?, maxMatches? (default 100, max 500)}` | `{file,line,text}[]`, **TOON-encoded**; truncated with a "narrow your pattern" hint. Definitive empty state: `{matches:[], note:"no matches for <p> under <path>"}`. |
+| `grep` | `{pattern, path=".", glob?, caseSensitive?, maxMatches? (default 100, max 500), contextLines? (0-10, default 0)}` | `{file,line,text}[]`, **TOON-encoded**; truncated with a "narrow your pattern" hint. Definitive empty state: `{matches:[], note:"no matches for <p> under <path>"}`. With `contextLines > 0` every entry also carries `kind: match\|context` and the surrounding lines come back as their own entries, so the model can read the code around a hit without a follow-up `read_file` — measured at 542 bytes against the 17.7 KB whole-file read it replaces. `maxMatches` counts matches only, never context. |
 
 **Guardrails (`guardrails.ts`):**
 - Scope root fixed at startup (`--path`, default cwd), canonicalized with `realpathSync`.
@@ -413,7 +413,12 @@ recommend as a starting point"* — not *"is local delegation as good as Sonnet"
    `normal` is marginal for the same reason: the smoke question needs 6 steps and 33 KB against
    caps of 8 and 40 KB, and one observed run spent all 8 steps without writing an answer
    (`docs/dogfood-log.md`). Re-size the three presets against `read_file`'s real page cost, then
-   run the eval.
+   run the eval. **Re-tune `TOOL_CALL_RESERVATION_BYTES` in the same pass**: since the byte
+   budget admits a call by reserving that many bytes up front, the reservation and the cap
+   together decide how many tool calls a step may run in parallel — at today's 16 KB reservation
+   that is 1 call for `quick`, 3 for `normal` and 8 for `deep`. A reservation at or above a
+   preset's cap disables concurrency for that preset entirely, which is a real behavioural knob
+   and not just an accounting detail.
 7. **Integrations + adoption** — `docs/integrations/*.md`; in `local-ai`: `scoutling.config.json`,
    `.claude/skills/scoutling/SKILL.md`, one line in `CLAUDE.md`.
 8. **Publish** — README with the eval numbers, `npm publish --provenance` from CI on `v0.1.0`

@@ -4,6 +4,7 @@ import { z } from 'zod'
 
 import {
   BUDGET_PRESETS,
+  TOOL_CALL_RESERVATION_BYTES,
   ToolOutputBudget,
   isBudgetPreset,
   resolveBudget,
@@ -76,13 +77,66 @@ describe('ToolOutputBudget', () => {
     expect(budget.exhausted).toBe(false)
   })
 
-  it('becomes exhausted once charges reach the limit', () => {
+  it('becomes exhausted once settled spend reaches the limit', () => {
     const budget = new ToolOutputBudget(10)
-    budget.charge(9)
+    expect(budget.admit(9)).toBe(true)
+    budget.settle(9, 9)
     expect(budget.exhausted).toBe(false)
-    budget.charge(1)
+    expect(budget.admit(1)).toBe(true)
+    budget.settle(1, 1)
     expect(budget.spent).toBe(10)
     expect(budget.exhausted).toBe(true)
+  })
+
+  it('refuses admission once a reservation alone would reach the limit, before anything settles', () => {
+    // The bug this class exists to close: a check against settled spend
+    // alone lets every concurrent call see spentBytes === 0 before any of
+    // them has posted a real size. admit() must refuse based on outstanding
+    // reservations too, synchronously, with no settle() in between.
+    const budget = new ToolOutputBudget(10)
+    expect(budget.admit(10)).toBe(true)
+    expect(budget.spent).toBe(0) // nothing settled yet — this is the trap
+    expect(budget.admit(1)).toBe(false) // but the reservation already fills the cap
+  })
+
+  it('is exhausted once a call is refused, even though settled spend alone is still under the limit', () => {
+    // The trap named in budget.ts: 35 KB settled + a 16 KB hold still
+    // outstanding from a second, not-yet-settled call can refuse a third
+    // call against a 40 KB cap while `spent` (settled only) still reads
+    // under the cap. Reporting exhausted: false there would tell the caller
+    // its answer used the full evidence budget when a call was in fact
+    // turned away.
+    const budget = new ToolOutputBudget(40_000)
+
+    // Call A: admitted, then settles for 35 KB.
+    expect(budget.admit(16_000)).toBe(true)
+    budget.settle(16_000, 35_000)
+    expect(budget.spent).toBe(35_000)
+    expect(budget.exhausted).toBe(false)
+
+    // Call B: admitted (35_000 + 0 < 40_000) — its 16 KB hold is now
+    // outstanding, deliberately left unsettled to simulate "still in flight".
+    expect(budget.admit(16_000)).toBe(true)
+
+    // Call C: refused — 35_000 settled + B's 16_000 hold already committed
+    // is >= the 40_000 cap, even though nothing more has actually settled.
+    expect(budget.admit(16_000)).toBe(false)
+    expect(budget.spent).toBe(35_000) // settled spend never moved
+    expect(budget.spent).toBeLessThan(40_000)
+    expect(budget.exhausted).toBe(true) // but the refusal alone makes the run exhausted
+  })
+
+  it('releases a reservation on settle, so it does not behave like a permanent charge', () => {
+    // N sequential small calls must not exhaust a budget that comfortably
+    // fits them — each call's reservation has to come back off the books
+    // once it settles, not stay held for the rest of the run.
+    const budget = new ToolOutputBudget(1_000)
+    for (let i = 0; i < 20; i += 1) {
+      expect(budget.admit(TOOL_CALL_RESERVATION_BYTES)).toBe(true)
+      budget.settle(TOOL_CALL_RESERVATION_BYTES, 10)
+    }
+    expect(budget.spent).toBe(200)
+    expect(budget.exhausted).toBe(false)
   })
 })
 
@@ -178,5 +232,39 @@ describe('withToolOutputBudget', () => {
       message: 'Tool-output budget exhausted — synthesize an answer from what you have already seen.',
       hint: 'Do not call more tools; state explicitly what you could not verify.',
     })
+  })
+
+  it('releases the reservation when execute() throws, so a later call is still admitted', async () => {
+    // Without try/finally around settle(), a thrown call would leak its
+    // TOOL_CALL_RESERVATION_BYTES hold forever, wedging the budget for every
+    // subsequent call in the run even though nothing was ever really spent.
+    const budget = new ToolOutputBudget(10_000)
+    const throwingTool = tool({
+      description: 'fake tool that always throws',
+      inputSchema: z.object({}),
+      execute: async (): Promise<{ data: string }> => {
+        throw new Error('boom')
+      },
+    })
+    const toolSet = {
+      read_file: throwingTool,
+      list_dir: throwingTool,
+      grep: throwingTool,
+    } as unknown as ToolSet
+    const wrapped = withToolOutputBudget(toolSet, budget)
+
+    await expect(wrapped.read_file.execute?.({ path: 'fake.txt' }, callOptions('call-1'))).rejects.toThrow('boom')
+
+    // The reservation is released: no bytes were ever settled, and the
+    // budget is not exhausted, so a later call is admitted normally.
+    expect(budget.spent).toBe(0)
+    expect(budget.exhausted).toBe(false)
+
+    const { toolSet: workingToolSet } = makeFakeToolSet()
+    const wrappedWorking = withToolOutputBudget(workingToolSet, budget)
+    const secondResult = await wrappedWorking.read_file.execute?.({ path: 'fake.txt' }, callOptions('call-2'))
+
+    expect(secondResult).toEqual({ data: 'x'.repeat(500) })
+    expect(budget.spent).toBeGreaterThan(0)
   })
 })

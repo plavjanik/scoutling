@@ -27,6 +27,12 @@ After the phase closed, two Phase-4 follow-ups were done on top of it:
 marginal for the same reason — the smoke question needs 6 steps and 33 KB against caps of 8 and
 40 KB, and one observed run spent all 8 steps without writing an answer.
 
+Re-tune `TOOL_CALL_RESERVATION_BYTES` in the same pass. The byte budget admits a call by
+reserving that many bytes up front, so the reservation and the cap together decide how many tool
+calls a step may run in parallel: at today's 16 KB reservation that is **1** for `quick`, **3**
+for `normal`, **8** for `deep`. A reservation at or above a preset's cap turns concurrency off
+for that preset entirely — a behavioural knob, not just accounting.
+
 This is written into DESIGN.md §13 item 6 as well, so it is not lost if this file goes away.
 The measurements behind it are in `docs/dogfood-log.md`.
 

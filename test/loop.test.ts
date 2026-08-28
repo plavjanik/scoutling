@@ -1,10 +1,14 @@
-import { describe, expect, it } from 'vitest'
-import { resolve } from 'node:path'
+import { describe, expect, it, afterEach } from 'vitest'
+import { resolve, join } from 'node:path'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { MockLanguageModelV4 } from 'ai/test'
 
 import { runScoutling } from '../src/loop.js'
 import { resolveScopeRoot } from '../src/guardrails.js'
 import { ScoutlingError } from '../src/errors.js'
+import { TOOL_CALL_RESERVATION_BYTES } from '../src/budget.js'
+import { createReadFileTool } from '../src/tools/read-file.js'
 
 const scopeRoot = resolveScopeRoot(resolve(import.meta.dirname, 'fixtures/scope'))
 
@@ -427,5 +431,85 @@ describe('runScoutling', () => {
       expect(scoutlingError.code).toBe('TIMEOUT')
       expect(scoutlingError.hint).toMatch(/cold-load|timeout-ms/i)
     }
+  })
+})
+
+describe('runScoutling — concurrent tool calls in one step (budget regression)', () => {
+  const tempDirs: string[] = []
+  afterEach(() => {
+    while (tempDirs.length > 0) {
+      const dir = tempDirs.pop()
+      if (dir) rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('bounds four parallel read_file calls in one step to well under 2x the byte cap', async () => {
+    // The AI SDK executes every tool call belonging to one step concurrently
+    // (Promise.all under the hood), so a budget that only checks
+    // `exhausted` and charges *after* `execute()` returns lets every call in
+    // the step observe `exhausted === false` before any of them has posted
+    // its cost. Real repro that motivated the admit/settle fix in budget.ts:
+    // four parallel `read_file` calls against `maxToolOutputBytes: 5000`
+    // charged 71,084 bytes total — 14x the cap — before this fix. This test
+    // reproduces the same shape (one step, four parallel read_file calls of
+    // a real file) and pins that the total charged now stays bounded.
+    const dir = mkdtempSync(join(tmpdir(), 'scoutling-budget-concurrency-'))
+    tempDirs.push(dir)
+
+    // A file whose default 400-line `read_file` page is realistically large
+    // (comparable to the ~17-18 KB TOOL_CALL_RESERVATION_BYTES was sized
+    // from), so this reproduces genuine per-call overshoot rather than a
+    // toy-sized read that would pass by accident.
+    const lines: string[] = []
+    for (let i = 1; i <= 450; i += 1) lines.push(`synthetic fixture line ${i} for the concurrency regression test`)
+    writeFileSync(join(dir, 'big.txt'), lines.join('\n') + '\n', 'utf8')
+
+    const bigScopeRoot = resolveScopeRoot(dir)
+
+    // Measure one real call's cost directly (same tool, same file) as the
+    // reference point for "unbounded" (4x this) vs "bounded" (this test's
+    // assertions below).
+    const probeTool = createReadFileTool(bigScopeRoot)
+    const probeResult = await probeTool.execute?.(
+      { path: 'big.txt' },
+      { toolCallId: 'probe', messages: [], context: {} },
+    )
+    const perCallBytes = Buffer.byteLength(JSON.stringify(probeResult), 'utf8')
+    // Confirms the fixture is a realistic worst case, not a toy that happens
+    // to fit inside one reservation.
+    expect(perCallBytes).toBeGreaterThan(TOOL_CALL_RESERVATION_BYTES)
+
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => ({
+        content: [1, 2, 3, 4].map((n) => ({
+          type: 'tool-call' as const,
+          toolCallId: `call-${n}`,
+          toolName: 'read_file',
+          input: JSON.stringify({ path: 'big.txt' }),
+        })),
+        finishReason: { unified: 'tool-calls' as const, raw: undefined },
+        usage: usage(),
+        warnings: [],
+      }),
+    })
+
+    const cap = 16_000
+    const result = await runScoutling({
+      question: 'Read big.txt.',
+      scopeRoot: bigScopeRoot,
+      model,
+      budget: { maxSteps: 1, maxToolOutputBytes: cap },
+    })
+
+    // All four calls were issued by the model...
+    expect(result.toolCalls.read_file).toBe(4)
+    // ...but the reservation means at most one ~28 KB call can be admitted
+    // for real against a 16 KB cap once its sibling's hold is outstanding —
+    // this is the assertion that fails loudly (~4 * perCallBytes if
+    // admit/settle is removed, matching the reported repro's shape: four
+    // parallel calls all charged in full regardless of the cap).
+    expect(result.toolOutputBytes).toBeLessThan(2 * cap)
+    expect(result.toolOutputBytes).toBeLessThan(2 * perCallBytes)
+    expect(result.exhausted).toBe(true)
   })
 })

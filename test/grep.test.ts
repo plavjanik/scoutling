@@ -9,6 +9,7 @@ import {
   MAX_MAX_MATCHES,
   MAX_MATCH_TEXT_CHARS,
   MAX_FALLBACK_PATTERN_CHARS,
+  MAX_CONTEXT_LINES,
 } from '../src/tools/grep.js'
 import { resolveScopeRoot } from '../src/guardrails.js'
 
@@ -34,7 +35,14 @@ afterEach(() => {
 /** Executes the tool the way the AI SDK does: input first, options second. */
 async function run(
   tool: ReturnType<typeof createGrepTool>,
-  input: { pattern: string; path?: string; glob?: string; caseSensitive?: boolean; maxMatches?: number },
+  input: {
+    pattern: string
+    path?: string
+    glob?: string
+    caseSensitive?: boolean
+    maxMatches?: number
+    contextLines?: number
+  },
 ): Promise<unknown> {
   if (!tool.execute) throw new Error('grep tool has no execute()')
   return tool.execute(input, { toolCallId: 'call-1', messages: [], context: {} })
@@ -43,7 +51,7 @@ async function run(
 interface OkShape {
   pattern: string
   path: string
-  matches: { file: string; line: number; text: string }[]
+  matches: { file: string; line: number; text: string; kind?: 'match' | 'context' }[]
   note?: string
   engine: 'ripgrep' | 'fallback'
 }
@@ -188,6 +196,22 @@ describe('grep (ripgrep backend)', () => {
     expect(result.error).toBe('INVALID_PATTERN')
     expect(result.message.length).toBeGreaterThan(0)
   })
+
+  it('omits the kind field entirely when contextLines is absent (default), unchanged from before', async () => {
+    const tool = createGrepTool(scopeRoot)
+    const result = (await run(tool, { pattern: 'line1' })) as OkShape
+
+    expect(result.matches).toEqual([{ file: 'a.txt', line: 1, text: 'line1' }])
+    expect(Object.prototype.hasOwnProperty.call(result.matches[0], 'kind')).toBe(false)
+  })
+
+  it('omits the kind field entirely when contextLines is explicitly 0', async () => {
+    const tool = createGrepTool(scopeRoot)
+    const result = (await run(tool, { pattern: 'line1', contextLines: 0 })) as OkShape
+
+    expect(result.matches).toEqual([{ file: 'a.txt', line: 1, text: 'line1' }])
+    expect(Object.prototype.hasOwnProperty.call(result.matches[0], 'kind')).toBe(false)
+  })
 })
 
 describe('grep (JS fallback, forced via a nonexistent rgPath)', () => {
@@ -230,6 +254,151 @@ describe('grep (JS fallback, forced via a nonexistent rgPath)', () => {
     expect(result.error).toBeDefined()
     expect(result.message).toMatch(/200/)
     expect(result.hint).toMatch(/ripgrep|bundled|unavailable/i)
+  })
+
+  it('returns context lines around a match, tagged engine: fallback', async () => {
+    const dir = tempDir('scoutling-grep-fallback-context-')
+    writeFileSync(join(dir, 'a.txt'), 'line1\nline2\nneedle3\nline4\nline5\nneedle6\nline7\nline8\n')
+    const tool = createGrepTool(resolveScopeRoot(dir), { rgPath: NONEXISTENT_RG_PATH })
+
+    const result = (await run(tool, { pattern: 'needle', contextLines: 2 })) as OkShape
+
+    expect(result.engine).toBe('fallback')
+    expect(result.matches).toEqual([
+      { file: 'a.txt', line: 1, text: 'line1', kind: 'context' },
+      { file: 'a.txt', line: 2, text: 'line2', kind: 'context' },
+      { file: 'a.txt', line: 3, text: 'needle3', kind: 'match' },
+      { file: 'a.txt', line: 4, text: 'line4', kind: 'context' },
+      { file: 'a.txt', line: 5, text: 'line5', kind: 'context' },
+      { file: 'a.txt', line: 6, text: 'needle6', kind: 'match' },
+      { file: 'a.txt', line: 7, text: 'line7', kind: 'context' },
+      { file: 'a.txt', line: 8, text: 'line8', kind: 'context' },
+    ])
+  })
+})
+
+describe('grep contextLines', () => {
+  /**
+   * Fixture where two matches (line 3, line 6) are 3 lines apart with
+   * contextLines: 2 — their windows [1,5] and [4,8] overlap at lines 4-5,
+   * exercising merge-without-duplication.
+   */
+  const OVERLAP_FIXTURE = 'line1\nline2\nneedle3\nline4\nline5\nneedle6\nline7\nline8\n'
+  const OVERLAP_EXPECTED = [
+    { file: 'a.txt', line: 1, text: 'line1', kind: 'context' },
+    { file: 'a.txt', line: 2, text: 'line2', kind: 'context' },
+    { file: 'a.txt', line: 3, text: 'needle3', kind: 'match' },
+    { file: 'a.txt', line: 4, text: 'line4', kind: 'context' },
+    { file: 'a.txt', line: 5, text: 'line5', kind: 'context' },
+    { file: 'a.txt', line: 6, text: 'needle6', kind: 'match' },
+    { file: 'a.txt', line: 7, text: 'line7', kind: 'context' },
+    { file: 'a.txt', line: 8, text: 'line8', kind: 'context' },
+  ]
+
+  /**
+   * Fixture with a match on line 1 (no room for leading context), two matches
+   * only 1 line apart (line 3, line 4 — closer than 2*contextLines, so their
+   * windows overlap heavily) and a match on the last line (no room for
+   * trailing context). Verified against the real ripgrep binary's --json -C
+   * output before writing this fixture (see report).
+   */
+  const BOUNDARY_FIXTURE = 'needleA\nline2\nneedleB\nneedleC\nline5\nline6\nneedleD\n'
+  const BOUNDARY_EXPECTED = [
+    { file: 'boundary.txt', line: 1, text: 'needleA', kind: 'match' },
+    { file: 'boundary.txt', line: 2, text: 'line2', kind: 'context' },
+    { file: 'boundary.txt', line: 3, text: 'needleB', kind: 'match' },
+    { file: 'boundary.txt', line: 4, text: 'needleC', kind: 'match' },
+    { file: 'boundary.txt', line: 5, text: 'line5', kind: 'context' },
+    { file: 'boundary.txt', line: 6, text: 'line6', kind: 'context' },
+    { file: 'boundary.txt', line: 7, text: 'needleD', kind: 'match' },
+  ]
+
+  it('ripgrep: returns match plus up to contextLines lines either side, in line order, correctly tagged', async () => {
+    const dir = tempDir('scoutling-grep-ctx-rg-')
+    writeFileSync(join(dir, 'a.txt'), OVERLAP_FIXTURE)
+    const tool = createGrepTool(resolveScopeRoot(dir))
+
+    const result = (await run(tool, { pattern: 'needle', contextLines: 2 })) as OkShape
+
+    expect(result.engine).toBe('ripgrep')
+    expect(result.matches).toEqual(OVERLAP_EXPECTED)
+  })
+
+  it('fallback: produces the identical entries as ripgrep for the same overlap fixture', async () => {
+    const dir = tempDir('scoutling-grep-ctx-fallback-')
+    writeFileSync(join(dir, 'a.txt'), OVERLAP_FIXTURE)
+    const tool = createGrepTool(resolveScopeRoot(dir), { rgPath: NONEXISTENT_RG_PATH })
+
+    const result = (await run(tool, { pattern: 'needle', contextLines: 2 })) as OkShape
+
+    expect(result.engine).toBe('fallback')
+    expect(result.matches).toEqual(OVERLAP_EXPECTED)
+  })
+
+  it('does not invent lines or go out of range at a file boundary, and a match within another match\'s context stays "match" (both engines)', async () => {
+    const dirRg = tempDir('scoutling-grep-ctx-boundary-rg-')
+    writeFileSync(join(dirRg, 'boundary.txt'), BOUNDARY_FIXTURE)
+    const rgTool = createGrepTool(resolveScopeRoot(dirRg))
+    const rgResult = (await run(rgTool, { pattern: 'needle', contextLines: 2 })) as OkShape
+    expect(rgResult.engine).toBe('ripgrep')
+    expect(rgResult.matches).toEqual(BOUNDARY_EXPECTED)
+
+    const dirFallback = tempDir('scoutling-grep-ctx-boundary-fallback-')
+    writeFileSync(join(dirFallback, 'boundary.txt'), BOUNDARY_FIXTURE)
+    const fallbackTool = createGrepTool(resolveScopeRoot(dirFallback), { rgPath: NONEXISTENT_RG_PATH })
+    const fallbackResult = (await run(fallbackTool, { pattern: 'needle', contextLines: 2 })) as OkShape
+    expect(fallbackResult.engine).toBe('fallback')
+    expect(fallbackResult.matches).toEqual(BOUNDARY_EXPECTED)
+  })
+
+  it('maxMatches: 1 with context returns one match plus its context, truncation reported based on matches only (both engines)', async () => {
+    const dirRg = tempDir('scoutling-grep-ctx-trunc-rg-')
+    writeFileSync(join(dirRg, 'boundary.txt'), BOUNDARY_FIXTURE)
+    const rgTool = createGrepTool(resolveScopeRoot(dirRg))
+    const rgResult = (await run(rgTool, { pattern: 'needle', contextLines: 2, maxMatches: 1 })) as OkShape
+    expect(rgResult.engine).toBe('ripgrep')
+    expect(rgResult.matches).toEqual([
+      { file: 'boundary.txt', line: 1, text: 'needleA', kind: 'match' },
+      { file: 'boundary.txt', line: 2, text: 'line2', kind: 'context' },
+    ])
+    expect(rgResult.matches.filter((m) => m.kind === 'match')).toHaveLength(1)
+    expect(rgResult.note).toMatch(/narrow/i)
+
+    const dirFallback = tempDir('scoutling-grep-ctx-trunc-fallback-')
+    writeFileSync(join(dirFallback, 'boundary.txt'), BOUNDARY_FIXTURE)
+    const fallbackTool = createGrepTool(resolveScopeRoot(dirFallback), { rgPath: NONEXISTENT_RG_PATH })
+    const fallbackResult = (await run(fallbackTool, {
+      pattern: 'needle',
+      contextLines: 2,
+      maxMatches: 1,
+    })) as OkShape
+    expect(fallbackResult.engine).toBe('fallback')
+    expect(fallbackResult.matches).toEqual(rgResult.matches)
+    expect(fallbackResult.note).toMatch(/narrow/i)
+  })
+
+  it('clamps an out-of-range contextLines instead of erroring', async () => {
+    const dir = tempDir('scoutling-grep-ctx-clamp-high-')
+    // 13 lines, needle in the middle: with the true cap (10) the window
+    // covers the whole file; a much larger requested value must not extend
+    // beyond the clamp (there'd be nothing further to show here anyway, but
+    // the request itself — 99 — must not be rejected as invalid input).
+    const lines = Array.from({ length: 21 }, (_, i) => (i === 10 ? 'needle' : `line${i + 1}`))
+    writeFileSync(join(dir, 'a.txt'), lines.join('\n') + '\n')
+    const tool = createGrepTool(resolveScopeRoot(dir))
+
+    const result = (await run(tool, { pattern: 'needle', contextLines: 99 })) as OkShape
+    expect(result.engine).toBe('ripgrep')
+    // Clamped to MAX_CONTEXT_LINES (10): match at line 11, window lines 1-21 (10 either side).
+    expect(result.matches).toHaveLength(1 + 2 * MAX_CONTEXT_LINES)
+    expect(result.matches.find((m) => m.line === 11)).toMatchObject({ kind: 'match' })
+    expect(result.matches[0]).toMatchObject({ line: 1, kind: 'context' })
+    expect(result.matches[result.matches.length - 1]).toMatchObject({ line: 21, kind: 'context' })
+
+    const negativeResult = (await run(tool, { pattern: 'needle', contextLines: -3 })) as OkShape
+    // A negative value clamps to 0 — same observable shape as the default: no `kind` key at all.
+    expect(negativeResult.matches).toEqual([{ file: 'a.txt', line: 11, text: 'needle' }])
+    expect(Object.prototype.hasOwnProperty.call(negativeResult.matches[0], 'kind')).toBe(false)
   })
 })
 
