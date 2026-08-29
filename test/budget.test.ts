@@ -15,9 +15,9 @@ import type { ToolSet } from '../src/tools/index.js'
 describe('BUDGET_PRESETS', () => {
   it('matches DESIGN.md §7 exactly', () => {
     expect(BUDGET_PRESETS).toEqual({
-      quick: { maxSteps: 6, maxToolOutputBytes: 40_000, timeoutMs: 300_000, maxOutputTokens: 8_000 },
-      normal: { maxSteps: 12, maxToolOutputBytes: 80_000, timeoutMs: 600_000, maxOutputTokens: 12_000 },
-      deep: { maxSteps: 24, maxToolOutputBytes: 200_000, timeoutMs: 1_200_000, maxOutputTokens: 16_000 },
+      quick: { maxSteps: 8, maxToolOutputBytes: 48_000, timeoutMs: 420_000, maxOutputTokens: 8_000 },
+      normal: { maxSteps: 14, maxToolOutputBytes: 112_000, timeoutMs: 660_000, maxOutputTokens: 12_000 },
+      deep: { maxSteps: 28, maxToolOutputBytes: 256_000, timeoutMs: 1_260_000, maxOutputTokens: 16_000 },
     })
   })
 
@@ -62,13 +62,13 @@ describe('TOOL_CALL_RESERVATION_BYTES against the presets (the parallelism knob)
     }
   })
 
-  it('admits 3 / 5 / 13 parallel calls under quick / normal / deep', () => {
+  it('admits 3 / 7 / 16 parallel calls under quick / normal / deep', () => {
     // Pinned, not just bounded: this is the parallelism Phase 6's tuning
     // chose, and a later change to either the reservation or a cap should
     // have to state its new number out loud rather than drift into one.
     expect(parallelCallsAdmitted(BUDGET_PRESETS.quick.maxToolOutputBytes)).toBe(3)
-    expect(parallelCallsAdmitted(BUDGET_PRESETS.normal.maxToolOutputBytes)).toBe(5)
-    expect(parallelCallsAdmitted(BUDGET_PRESETS.deep.maxToolOutputBytes)).toBe(13)
+    expect(parallelCallsAdmitted(BUDGET_PRESETS.normal.maxToolOutputBytes)).toBe(7)
+    expect(parallelCallsAdmitted(BUDGET_PRESETS.deep.maxToolOutputBytes)).toBe(16)
   })
 
   it('holds worst-case concurrent overshoot under 2.5x every preset cap', () => {

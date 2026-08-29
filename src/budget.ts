@@ -68,11 +68,37 @@ export interface Budget {
  * `maxOutputTokens` rises for `quick` because 4 000 truncates a
  * reasoning-capable local model mid-think, and a step that truncates before
  * emitting its tool call is a step spent on nothing (DESIGN.md §7).
+ *
+ * **Second re-tune, 2026-08-29, from the eval rather than from file sizes.**
+ * The numbers above are the first re-sizing's; these are what running real
+ * questions said. A preset sweep of the four auto-gradable audit questions at
+ * all three presets (`qwen/qwen3-coder-next` against `local-ai`) produced:
+ *
+ * | preset  | passed | exhausted | what bound |
+ * |---------|--------|-----------|------------|
+ * | `quick`  | 2 of 4 | 3 of 4 | steps at 6, then bytes |
+ * | `normal` | 3 of 4 | 2 of 4 | bytes, both times |
+ * | `deep`   | 4 of 4 | 1 of 4 | bytes, at 210 KB |
+ *
+ * The number doing the work is `candidate-hunter-layers`: 56 KB and a fail at
+ * `quick`, 88.9 KB and a fail at `normal`, and a **clean pass at 92.1 KB**
+ * under `deep`. It needs ~92 KB, which fell in the gap between the old
+ * `normal` (80 KB) and `deep` (200 KB) — so `normal` was failing a question it
+ * was only ~15 % short of. `normal`'s 112 KB also covers the survey questions,
+ * separately measured at 107-114 KB. `quick` goes to 8 steps because
+ * `backtest-runner-header` wants 7 and got 6; its bytes are set from the two
+ * cheap audits, which cost 17.7 and 25.3 KB.
+ *
+ * **These are provisional and the tail is wide.** `form4-ticker-count` used
+ * 10.3 KB on one run and 210 KB on another — same question, same model,
+ * different path through it — which is why `deep` is 256 KB rather than
+ * something tighter, and why this table should be re-derived once the eval has
+ * run across four models rather than one.
  */
 export const BUDGET_PRESETS: Record<BudgetPreset, Budget> = {
-  quick: { maxSteps: 6, maxToolOutputBytes: 40_000, timeoutMs: 300_000, maxOutputTokens: 8_000 },
-  normal: { maxSteps: 12, maxToolOutputBytes: 80_000, timeoutMs: 600_000, maxOutputTokens: 12_000 },
-  deep: { maxSteps: 24, maxToolOutputBytes: 200_000, timeoutMs: 1_200_000, maxOutputTokens: 16_000 },
+  quick: { maxSteps: 8, maxToolOutputBytes: 48_000, timeoutMs: 420_000, maxOutputTokens: 8_000 },
+  normal: { maxSteps: 14, maxToolOutputBytes: 112_000, timeoutMs: 660_000, maxOutputTokens: 12_000 },
+  deep: { maxSteps: 28, maxToolOutputBytes: 256_000, timeoutMs: 1_260_000, maxOutputTokens: 16_000 },
 }
 
 export function isBudgetPreset(value: unknown): value is BudgetPreset {
