@@ -434,6 +434,24 @@ per model (one GPU), and writes `eval/results/<ts>-<model>.json` + a markdown ta
 machine, so the earlier draft's note that it does not exist was wrong. All four models above are
 confirmed present.)
 
+**`qwen/qwen3.8-27b` was dropped from the reference eval on 2026-08-29**, after the run rather
+than before it, for two independent reasons:
+
+- **It reproducibly takes the provider down.** On two separate attempts it completed exactly ten
+  cells and then died at the same one — `scoring-model` run 0 — with LM Studio becoming
+  unreachable (`PROVIDER_UNREACHABLE`), which the harness correctly treats as an abort rather
+  than 26 spurious per-question failures. LM Studio reports it as a 4-bit MLX **VLM** on the
+  `qwen3_5` arch loaded at a 262 144-token context; that KV cache, straight after cold-loading
+  the 80 B, is the likely cause. It is a provider/model failure, not a scoutling one.
+- **It is not a like-for-like comparison anyway.** It is the only 4-bit model of the four; the
+  other three are 8-bit. Ranking it against them measures quantization as much as architecture,
+  so a README recommendation drawn from it would not mean what it appears to mean.
+
+Its partial numbers are also distorted by the crash — 84 s/step against 6-14 s for the others,
+and 21 verified citations across ten cells — so they are recorded but not ranked. The reference
+eval is therefore **three models**, and the write-up must say so rather than quietly showing a
+table of three where the design promised four.
+
 **Runs:** 2 per cell — 1 at `temperature 0` + 1 at `0.5`. Measured on the reference endpoint: temp 0
 reproduces byte-for-byte, not just similarly (`scoring-model` returned exactly 67,249 tool-output
 bytes on two independent runs; `book-sweep-strategy-count`/`backtest-runner-header` returned
