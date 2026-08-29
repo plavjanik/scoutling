@@ -416,9 +416,13 @@ per model (one GPU), and writes `eval/results/<ts>-<model>.json` + a markdown ta
 machine, so the earlier draft's note that it does not exist was wrong. All four models above are
 confirmed present.)
 
-**Runs:** 3 per cell — 2 at `temperature 0` + 1 at `0.5`. At temp 0 most local backends repeat
-themselves; the variance that matters is tool-call parse failures, budget exhaustion and JIT
-timing, which the harness records per run (`stepsUsed`, `toolCallErrors`, `exhausted`).
+**Runs:** 2 per cell — 1 at `temperature 0` + 1 at `0.5`. Measured on the reference endpoint: temp 0
+reproduces byte-for-byte, not just similarly (`scoring-model` returned exactly 67,249 tool-output
+bytes on two independent runs; `book-sweep-strategy-count`/`backtest-runner-header` returned
+exactly 17,725/25,254 bytes across three different budget presets), so a second temp-0 run adds no
+data. The variance that matters is tool-call parse failures, budget exhaustion and JIT timing,
+which the harness records per run (`stepsUsed`, `toolCallErrors`, `exhausted`) and which a single
+temp-0.5 run still exercises.
 
 **Question sets:**
 - `eval/questions.example.json` — 2 self-referential questions about scoutling's own source

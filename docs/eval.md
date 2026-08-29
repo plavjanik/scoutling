@@ -56,7 +56,7 @@ and the total run count, without calling a model at all.
 | `--base-url <url>` | from resolved config | OpenAI-compatible endpoint. |
 | `--api-key <key>` | from resolved config | Sent as a Bearer token. |
 | `--budget <preset>` | `normal` | Default budget for questions that do not name their own (`quick`\|`normal`\|`deep`). |
-| `--temperatures <list>` | `0,0,0.5` | Comma-separated temperature schedule, one entry per run of a cell. |
+| `--temperatures <list>` | `0,0.5` | Comma-separated temperature schedule, one entry per run of a cell. |
 | `--runs <n>` | the length of `--temperatures` | Runs per cell. If larger than the temperature list, the schedule cycles (`--runs 5` with `--temperatures 0,0.5` gives `0, 0.5, 0, 0.5, 0`). |
 | `--out-dir <dir>` | `eval/results` (relative to cwd, gitignored) | Where result files land. |
 | `--dry-run` | off | Print the plan and exit 0 without calling a model. |
@@ -158,6 +158,14 @@ happens after config is loaded, so a repo's own `scoutling.config.json`/`.local.
 it (mirroring `src/scope-walk.ts`'s `ALWAYS_EXCLUDED_GLOBS`, kept local to the eval harness). It is
 automatic, not a step to remember — a warning of the form `{"warning":"QUESTIONS_FILE_EXCLUDED", ...}`
 is printed to stderr once per invocation whenever this actually happens, naming the excluded path.
+
+`runEval` also walks `--repo` (via `walkScope`, unbounded depth) for any file elsewhere in the tree
+sharing the question file's basename, and excludes every match too. This covers the case that
+actually happened: pointing `--questions` at a scratchpad copy or an edited subset while the
+original — still carrying its `expect.fact` answers — sits untouched inside `--repo`. The exact-path
+rule alone misses this, because it only ever looks at the one path `--questions` was given, never at
+what else in the repo shares its name. The warning names every excluded path, not just one, when
+more than one match is found.
 
 `eval/questions.example.json`, used against scoutling's own repo, and `local-ai/docs/scoutling-eval.json`,
 used against `local-ai`, are both real instances of this — see `local-ai`'s `docs/scoutling-eval.json`

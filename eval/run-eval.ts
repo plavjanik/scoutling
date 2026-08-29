@@ -11,7 +11,7 @@
  * doesn't, and how to grade the output.
  */
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { isBudgetPreset, resolveBudget } from '../src/budget.js'
@@ -23,6 +23,7 @@ import { ScoutlingError } from '../src/errors.js'
 import { resolvePath, resolveScopeRoot } from '../src/guardrails.js'
 import { runScoutling, type RunResult } from '../src/loop.js'
 import { buildRunInputs } from '../src/run-setup.js'
+import { walkScope } from '../src/scope-walk.js'
 import type { BudgetPreset, ScoutlingConfig } from '../src/types.js'
 
 // --- question-set file schema (DESIGN.md §12 / frozen contract Part B1) -----------------------
@@ -422,7 +423,21 @@ function parseTemperatures(raw: string): number[] {
   })
 }
 
-const DEFAULT_TEMPERATURES_RAW = '0,0,0.5'
+/**
+ * DESIGN.md §12: 2 runs per cell, not the original 3 (2 at temp 0 + 1 at
+ * 0.5). Measured on the reference LM Studio endpoint: temperature 0
+ * reproduces byte-for-byte, not just similarly — `scoring-model` returned
+ * exactly 67,249 tool-output bytes on two independent temp-0 runs, and
+ * `book-sweep-strategy-count` / `backtest-runner-header` returned exactly
+ * 17,725 / 25,254 bytes across three *different* budget presets. A second
+ * temp-0 run was re-measuring a deterministic result, not adding a data
+ * point. One stochastic run per cell (temp 0.5) still catches the variance
+ * DESIGN §12 actually cares about — tool-call parse failures, budget
+ * exhaustion, JIT timing — since those come from the run itself, not from
+ * sampling temperature held at 0. Cuts a four-model sweep from ~3.5h to
+ * ~2.3h.
+ */
+const DEFAULT_TEMPERATURES_RAW = '0,0.5'
 const DEFAULT_QUESTIONS_FILE = 'eval/questions.example.json'
 const DEFAULT_OUT_DIR = 'eval/results'
 
@@ -508,6 +523,52 @@ function questionsFileExcludeGlob(repoRoot: string, questionsPath: string): stri
   const rel = relative(repoRoot, realpathSync(questionsPath))
   if (rel.length === 0 || rel.startsWith('..') || isAbsolute(rel)) return undefined
   return toPosixExcludeGlob(rel)
+}
+
+/**
+ * Every file under `repoRoot` whose basename equals `targetBasename`,
+ * anywhere in the tree — repo-root-relative, POSIX-separated, `file`
+ * entries only (a same-named directory isn't a citation-answers risk).
+ * Reuses `walkScope` (CLAUDE.md: don't hand-roll a directory walk) with an
+ * unbounded depth and no `limit` cap, since a missed copy is exactly the
+ * contamination this exists to catch.
+ *
+ * Deliberately does NOT take an `excludeGlobs` argument: this runs once,
+ * before any per-model config is loaded (see the call site in `runEval`),
+ * and `walkScope` already skips `.git/**` (`ALWAYS_EXCLUDED_GLOBS`) and
+ * honours the repo's own `.gitignore` hierarchically regardless of
+ * `excludeGlobs` — which is what keeps this walk cheap on a real checkout:
+ * `node_modules/`, `dist/`, `out/` are gitignored in both scoutling and
+ * local-ai, so the walk never descends into them even with no explicit
+ * exclude list.
+ */
+function findQuestionsFileBasenameMatches(repoRoot: string, targetBasename: string): string[] {
+  const { entries } = walkScope({
+    scopeRoot: repoRoot,
+    dir: repoRoot,
+    depth: Number.POSITIVE_INFINITY,
+    glob: targetBasename,
+    limit: Number.POSITIVE_INFINITY,
+  })
+  return entries.filter((entry) => entry.type === 'file').map((entry) => entry.path)
+}
+
+/**
+ * All the exclude globs the question file's presence demands: the exact
+ * passed-file path when it resolves inside `repoRoot` (the existing rule,
+ * `questionsFileExcludeGlob`), UNIONED with every file elsewhere in
+ * `repoRoot` sharing its basename — the case that actually happened: a
+ * scratchpad copy, an edited subset, or a partial extract of a question set
+ * whose original still sits in the repo with every `expect.fact` intact.
+ * Deduped and sorted so the result (and the warning built from it) is
+ * deterministic regardless of walk order.
+ */
+function questionsFileExcludeGlobs(repoRoot: string, questionsPath: string): string[] {
+  const exact = questionsFileExcludeGlob(repoRoot, questionsPath)
+  const basenameMatches = findQuestionsFileBasenameMatches(repoRoot, basename(questionsPath))
+  const merged = new Set<string>(basenameMatches)
+  if (exact !== undefined) merged.add(exact)
+  return [...merged].sort()
 }
 
 // --- I/O interface (Part B6) -------------------------------------------------------------------
@@ -818,17 +879,21 @@ export async function runEval(io: EvalIo): Promise<number> {
     return emitError(error instanceof ScoutlingError ? error : new ScoutlingError('INTERNAL', String(error)))
   }
 
-  // Once repoRoot and questionsPath are both resolved (frozen contract Part
-  // 1): compute the self-exclusion once for the whole invocation, and warn
-  // once — never silently, per CLAUDE.md's "never degrade silently" (this
-  // is not a degrade, it's an alteration, which is the same obligation).
-  const questionsFileExclude = questionsFileExcludeGlob(repoRoot, questionsPath)
-  if (questionsFileExclude !== undefined) {
+  // Once repoRoot and questionsPath are both resolved: compute the
+  // self-exclusion once for the whole invocation, and warn once — never
+  // silently, per CLAUDE.md's "never degrade silently" (this is not a
+  // degrade, it's an alteration, which is the same obligation). Covers both
+  // the question file itself (when inside --repo) and any same-basename
+  // copy elsewhere in the tree (frozen contract: a copy left in place while
+  // --questions points elsewhere is the contamination that actually
+  // happened once).
+  const questionsFileExcludes = questionsFileExcludeGlobs(repoRoot, questionsPath)
+  if (questionsFileExcludes.length > 0) {
     writeStderr(
       `${JSON.stringify({
         warning: 'QUESTIONS_FILE_EXCLUDED',
-        message: `The question-set file (${questionsFileExclude}) is inside --repo, so it was excluded from every run's scope: its own expect.fact fields would otherwise hand a model the answers instead of the source.`,
-        hint: 'Keep the question set outside --repo to avoid this, or ignore this notice — the exclusion is automatic either way.',
+        message: `Excluded from every run's scope, so a model cannot answer by finding and quoting the question set instead of investigating the actual source: ${questionsFileExcludes.join(', ')}. This is the question-set file itself (when it sits inside --repo) plus any file elsewhere in --repo sharing its basename — a scratchpad copy, an edited subset, or a partial extract, all still carrying the original's expect.fact answers.`,
+        hint: 'Keep the question set (and any copies of it) outside --repo to avoid this, or ignore this notice — the exclusion is automatic either way.',
       })}\n`,
     )
   }
@@ -873,8 +938,8 @@ export async function runEval(io: EvalIo): Promise<number> {
       // structural-exclusion spirit as scope-walk.ts's ALWAYS_EXCLUDED_GLOBS,
       // kept local to the eval harness per the frozen contract rather than
       // touching that module.
-      if (questionsFileExclude !== undefined) {
-        config = { ...config, excludeGlobs: [...config.excludeGlobs, questionsFileExclude] }
+      if (questionsFileExcludes.length > 0) {
+        config = { ...config, excludeGlobs: [...config.excludeGlobs, ...questionsFileExcludes] }
       }
     } catch (error) {
       return emitError(error instanceof ScoutlingError ? error : new ScoutlingError('INTERNAL', String(error)))

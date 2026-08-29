@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -221,6 +221,17 @@ describe('runEval — scheduling', () => {
         'model-b:q2:0',
         'model-b:q2:0.5',
       ])
+    })
+  })
+
+  it('defaults to two runs per cell at temperatures [0, 0.5], in that order, when --temperatures is omitted', async () => {
+    await withTempDir(async (dir) => {
+      const path = writeQuestionFile(dir, basicQuestionFile({ questions: [{ id: 'q1', question: 'A?' }] }))
+      const { io, calls } = buildIo(['--models', 'model-a', '--questions', path, '--repo', fixtureRepo])
+      const code = await runEval(io)
+
+      expect(code).toBe(0)
+      expect(calls.map((call) => call.temperature)).toEqual([0, 0.5])
     })
   })
 
@@ -595,6 +606,49 @@ describe('runEval — questions-file self-exclusion', () => {
       expect(code).toBe(0)
       expect(calls[0]?.config.excludeGlobs).toContain('custom/**')
       expect(calls[0]?.config.excludeGlobs).toContain('questions.json')
+    })
+  })
+
+  it('a questions file outside --repo whose basename matches a file inside --repo excludes that inside file, named in the warning', async () => {
+    await withTempDir(async (outerDir) => {
+      await withTempDir(async (dir) => {
+        // The file the eval is actually invoked with — outside --repo.
+        const path = writeQuestionFile(outerDir, basicQuestionFile({ questions: [{ id: 'q1', question: 'A?' }] }))
+        // A same-named copy sitting inside --repo, nested, so the walk has to recurse to find it.
+        mkdirSync(join(dir, 'copies'), { recursive: true })
+        writeFileSync(join(dir, 'copies', 'questions.json'), JSON.stringify(basicQuestionFile()))
+
+        const { io, calls, stderr } = buildIo(['--models', 'model-a', '--questions', path, '--repo', dir, '--temperatures', '0'])
+        const code = await runEval(io)
+
+        expect(code).toBe(0)
+        expect(calls).toHaveLength(1)
+        expect(calls[0]?.config.excludeGlobs).toContain('copies/questions.json')
+
+        const warnings = stderr.filter((line) => line.includes('QUESTIONS_FILE_EXCLUDED'))
+        expect(warnings).toHaveLength(1)
+        expect(warnings[0]).toContain('copies/questions.json')
+      })
+    })
+  })
+
+  it('a questions file inside --repo that also has a same-named copy elsewhere in the tree excludes both', async () => {
+    await withTempDir(async (dir) => {
+      const path = writeQuestionFile(dir, basicQuestionFile({ questions: [{ id: 'q1', question: 'A?' }] }))
+      mkdirSync(join(dir, 'archive'), { recursive: true })
+      writeFileSync(join(dir, 'archive', 'questions.json'), JSON.stringify(basicQuestionFile()))
+
+      const { io, calls, stderr } = buildIo(['--models', 'model-a', '--questions', path, '--repo', dir, '--temperatures', '0'])
+      const code = await runEval(io)
+
+      expect(code).toBe(0)
+      expect(calls[0]?.config.excludeGlobs).toContain('questions.json')
+      expect(calls[0]?.config.excludeGlobs).toContain('archive/questions.json')
+
+      const warnings = stderr.filter((line) => line.includes('QUESTIONS_FILE_EXCLUDED'))
+      expect(warnings).toHaveLength(1)
+      expect(warnings[0]).toContain('questions.json')
+      expect(warnings[0]).toContain('archive/questions.json')
     })
   })
 })
