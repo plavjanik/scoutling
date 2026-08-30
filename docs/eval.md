@@ -222,6 +222,56 @@ For a manually graded question (no `expect`), there is no `auto` signal at all �
 entirely from reading the answer, using the question's `note` (if any) as the guide to what a
 correct answer needs to say.
 
+## Timeout policy: timing out is a result
+
+Every model runs against the **same** wall-clock cap (DESIGN.md §7's `timeoutMs`), sized from the
+fastest model measured. That is deliberate, and it is a policy rather than an accident of how the
+number was picked.
+
+A slower model therefore completes fewer steps inside the same budget, and the eval does not
+distinguish "could not answer" from "could not answer in eleven minutes". For a tool whose whole
+purpose is to be sent ahead and report back, that distinction does not matter much: a model
+needing ~115 s per step fails at the job regardless of what it would eventually have produced.
+
+What this costs, stated plainly: **a model that times out has had its speed measured, not its
+reasoning.** Its answers were cut off mid-investigation. Do not read a timeout-dominated row as
+evidence the model reasons poorly — it is evidence the model is too slow to be used this way on
+this hardware. If you ever need capability isolated from speed, raise `--timeout-ms` and report
+the two runs separately; do not silently give one model a longer clock than another.
+
+## Known incompatibility: `qwen3_5`-arch 27B models
+
+**`qwen/qwen3.8-27b` (both quantizations) and `qwen/qwen3.6-27b` cannot complete this question
+set.** Recorded 2026-08-29/30 so the next person does not spend the GPU hours rediscovering it.
+
+`qwen/qwen3.8-27b` took LM Studio down — the provider stopped responding entirely, surfacing as
+`PROVIDER_UNREACHABLE` — on **three separate attempts, at the identical cell** (`scoring-model`
+run 0), after exactly ten completed cells each time. The failure is deterministic, and three
+plausible explanations were each tested and eliminated:
+
+- **Memory pressure** — the machine has 512 GB with ~413 GB free at the time of the crash.
+- **Quantization** — the 4-bit and the 8-bit variant fail identically.
+- **Contention with another LM Studio consumer** — the third run crashed while the only other
+  loaded model was idle and subsequently TTL'd out.
+
+Whatever the cause, it is on LM Studio's or the model's side, not scoutling's: the harness aborts
+cleanly on `PROVIDER_UNREACHABLE` and flushes the partial results, which is why the ten cells
+survive each time. It has not been chased further because it is not on the path to a
+recommendation.
+
+Separately, **both models in this architecture family are ~10x slower per step** than the three
+ranked models (~115 s/step against 6-14 s), and hit the wall clock on most cells — six of ten for
+`qwen3.8-27b@8bit`, six of nine for `qwen3.6-27b`. Under the timeout policy above that is
+disqualifying on its own. Note carefully what was and was not measured: **their timeouts were
+measured, their answer quality was not**, because most of their answers were cut off before they
+finished.
+
+**Selecting a quantization.** LM Studio groups variants under one model key, and the OpenAI-
+compatible API exposes only the selected one — `lms ls` shows `qwen/qwen3.8-27b (2 variants)` and
+hides the rest. Use **`lms ls --variants`** to see the real keys (`qwen/qwen3.8-27b@4bit`,
+`@8bit`) and pass the suffixed id straight to `--model`; LM Studio JIT-loads that variant.
+`lms load` rejects the `@`-suffixed key, so do not try to pre-load it that way.
+
 ## Not in CI
 
 `DESIGN.md` §12 originally imagined running `questions.example.json` in CI as a smoke test,
