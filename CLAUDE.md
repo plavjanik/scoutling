@@ -26,60 +26,51 @@ tools (`tools/read-file.ts`, `tools/list-dir.ts`, `tools/grep.ts`, assembled by 
 `pnpm smoke` passes live on `qwen/qwen3-coder-next` **on the shipped defaults** — it no longer
 needs `--budget deep` or `--timeout-ms`.
 
-### Phase 6 so far
+### Phase 6 — the reference eval is run and graded
 
-**The presets were re-sized from measurement** (§7 carries the table and the derivation; the raw
-distributions are in `docs/dogfood-log.md`). Both premises that work was queued under were wrong:
-a default `read_file` page is 3-7 KB at the median, not 17 KB (that is the p90, measured from one
-file), and `quick`'s real defect was that its cap *equalled* `TOOL_CALL_RESERVATION_BYTES`, so a
-parallel pair of tool calls marked the run exhausted at once. The reservation stayed at 16 000 —
-lowering it admits more oversized calls through the same window and makes worst-case overshoot
-worse, not better.
+**Presets re-tuned twice** (§7 carries the table and both derivations). Exhaustion fell from 15 of
+26 cells (57 %) at DESIGN's original guesses to 3 of 54 (5 %).
 
-**Then the first eval model was run** (`qwen/qwen3-coder-next`, 9 questions x 3 runs against
-`local-ai`, 51 min wall). **`normal` is still too small: 15 of 26 completed runs (57 %) exhausted,
-and 7 of the 9 questions exhausted at least once.**
+**Three models ranked**, each 9 questions x 2 runs. Audits are machine-graded; all 30 survey
+answers were hand-checked claim-by-claim against `local-ai`'s source.
 
-| question | mean/max steps (cap 12) | mean/max bytes (cap 80 k) | mean wall | exhausted |
-|---|---|---|---|---|
-| book-sweep-strategy-count | 3/3 | 17.7 k / 17.7 k | 16 s | 0/3 |
-| backtest-runner-header | 7/7 | 24.2 k / 25.3 k | 29 s | 0/3 |
-| candidate-hunter-layers | 9/12 | 80.8 k / 89.8 k | 242 s | **3/3** |
-| form4-ticker-count | 8/8 | 86.5 k / 86.5 k | 259 s | **2/2** |
-| pipeline-stages | 10/11 | 86.2 k / 86.2 k | 286 s | **3/3** |
-| scoring-model | 6/6 | 67.2 k / 67.2 k | 100 s | 0/3 |
-| strategy-tournament | 11/12 | 77.0 k / 85.6 k | 75 s | **3/3** |
-| mcp-server-boundary | 11/12 | 35.0 k / 35.9 k | 43 s | 1/3 |
-| learn-glossary-system | 12/12 | 58.8 k / 67.8 k | 58 s | **3/3** |
+| model | audits (2 runs) | surveys solid | verified cites | exhausted | s/step |
+|---|---|---|---|---|---|
+| `qwen3.6-35b-a3b` | 6/8, 6/8 | **7 of 10** | **364 / 382** | **0, 0** | 16 |
+| `qwen3-coder-next` | 6/8, 7/8 | 5 of 10 | 253 / 225 | 1, 2 | 17 |
+| `qwen3-next-80b` | 3/8, 2/8 | 2 of 10 (thin) | 167 / 179 | 2, 2 | 8 |
 
-Three things to carry into the re-tune, none of them guesses any more:
+**Draft recommendation: `qwen/qwen3.6-35b-a3b`**, with `qwen3-coder-next` as the cheaper choice for
+narrow single-file questions. DESIGN §12 called `qwen3-next-80b` "the leading hypothesis"; that is
+disproved — it is fastest and clearly last on quality.
 
-- **Both caps bind, on the same question.** `candidate-hunter-layers` exhausted on *bytes* twice
-  (88-90 KB) and on *steps* once (12/12 at only 64 KB), depending on the path the model took.
-  `learn-glossary-system` and `strategy-tournament` bind on steps at well under the byte cap.
-  Raising one without the other just moves which cap fires.
-- **The earlier re-sizing was validated on the wrong shape of question.** It was checked against
-  scoutling's own smoke question — 6 steps, 45 KB, well-targeted — which does not resemble a
-  question that has to *derive* a value across a large repo (dedupe 145 `WATCHLIST` entries,
-  subtract 6 `coverage:"quotes"` ones). That class is where `normal` fails.
-- **A timeout still costs the whole cell — fixed 2026-08-28.** `form4-ticker-count` run 2 hit the
-  600 s wall and returned nothing at all, because `generateText` rejects on abort and every
-  completed step used to be discarded (DESIGN.md §15). Fixed: `loop.ts` now accumulates each
-  step via `onStepFinish`, and a timeout with at least one completed step returns a normal
-  `RunResult` (`timedOut: true`, `exhaustedBy` including `'timeout'`) instead of throwing, exit 1;
-  a zero-step timeout still throws `ScoutlingError('TIMEOUT')`, exit 4, unchanged. `exhaustedBy`
-  (`'steps'`/`'bytes'`/`'timeout'`, any subset) also now reports which cap(s) actually fired,
-  everywhere `exhausted` used to be a single boolean — `RunResult`, `--format json`, the
-  `BUDGET_EXHAUSTED` warning's message, and both eval summary tables (a new per-run column, a new
-  per-model per-cap count).
+Four things worth carrying, all of which cost real time to learn:
 
-**And `auto: pass` is not a verdict, demonstrated:** `form4-ticker-count` scored `auto: pass` on
-both completed runs with **zero verified citations** — the answer contained the right numbers and
-symbol names while citing nothing that resolves against the scope. That is exactly why
-`docs/eval.md` keeps the `correct?` column empty and human. Grade by reading, not by the column.
+- **The two contenders fail differently, and that matters more than the scores.**
+  `coder-next` states wrong *relationships* compactly and confidently — it called Dorsey Momentum
+  "pure price-based" when `dorsey-moat.ts:5` says PRICE-BLIND, fundamentals-only. `35b-a3b`
+  fabricates *list items* at the margin of long enumerations (a nonexistent `score-score.ts`, a
+  line 333 in a 234-line file). The first is expensive to catch; the second is cheap. Tell a
+  caller which failure to watch for rather than only which model scored higher.
+- **`auto: pass` is not a verdict, and it was caught being wrong.** Two runs passed with *zero*
+  verified citations. The audit matchers now require a `path:line` token. The residual gap: the
+  token proves the answer *contains* a citation, not that it *resolves* — closing that means
+  grading on `verifiedSources` in the harness.
+- **Run-to-run variance is +/-1 on 8 audit cells**, so `coder-next` and `35b-a3b` are
+  indistinguishable there; the surveys and the citation counts are what separate them.
+- **Timing numbers are noisy for reasons other than contention.** Re-measuring on a genuinely
+  quiet GPU produced numbers *slower* than the supposedly contended run (17.1 vs 11.4 s/step for
+  `coder-next`) — most likely JIT cold-load amortised over fewer cells. Do not treat any single
+  s/step figure as precise.
 
-**Do not change the presets mid-sweep.** The remaining three models have to run at the same caps
-or the cells are not comparable; re-tune after, then re-run.
+**Two model families were excluded, for cause** (`docs/eval.md` has the detail): `qwen3.8-27b` and
+`qwen3.6-27b`, both `qwen3_5`-arch VLMs, are ~10x slower per step and time out on most cells, and
+`qwen3.8-27b` reproducibly takes LM Studio down at the identical cell on three attempts. Memory,
+quantization and co-tenant contention were each tested and eliminated as causes.
+
+**What remains in Phase 6:** write the results into `docs/eval.md` and the README, fix five defects
+the grading exposed in the eval *items* themselves, and a small `normal` nudge (~16 steps /
+128 KB). `plan.md` is the working status document.
 
 The whole CLI contract of DESIGN.md §9 exists: `--budget quick|normal|deep` with `--max-steps` /
 `--max-tool-bytes` / `--timeout-ms` overriding individual caps, `--format text|json`,
