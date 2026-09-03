@@ -166,9 +166,25 @@ run still passes on a citation that does not verify. Closing it means grading on
 3. **Third preset nudge:** `normal` hit 14/14 steps twice and 122 KB against a 112 KB cap, so
    ~16 steps / 128 KB. `deep` used 23/28 steps and 51 % of its bytes — leave it generous.
 4. **Write the results** into `docs/eval.md` and the README (DESIGN §13 item 6). This closes Phase 6.
-5. **Phase 7 — integrations:** `docs/integrations/*.md`; in `local-ai`, a `scoutling.config.json`
+5. **Phase 6b — decided 2026-09-03 from the subagent census** (`docs/subagent-census.md`; the
+   decisions are Petr's, made on the census numbers):
+   - **Accept a multi-question brief in one run.** 70 % of real briefs carry 3–8 numbered
+     questions. The system prompt asks for one heading per numbered item; `--format json` gains
+     per-section citations. The skill's "one question per run" line goes.
+   - **Two new read-only inputs, each as an ADR beside 0002:** a fixed-argv `git show/log/diff`
+     tool (no argv from the model), and a read-only `--attach <file>` for a saved diff or plan.
+     Together they cover the 20 diff-review agents and the 15 % of runs that read evidence
+     outside the scope root.
+   - **Grep `filesOnly` / `countOnly` and a negative glob** on `grep` and `list_dir`; counts in
+     truncated results.
+   - **Eval expansion after Phase 6 closes:** `eval/questions.screenwright.json` with the ten
+     drafted items (find/confirm, trace-order, why, inventory, the multi-question brief), then
+     one re-run across the three reference models. Verify every line number first.
+   - **Skill:** fan-out guidance (parallel runs queue on one GPU); map the brief's thoroughness
+     word to `--budget`. The stale preset numbers were fixed the same day.
+6. **Phase 7 — integrations:** `docs/integrations/*.md`; in `local-ai`, a `scoutling.config.json`
    (done), the skill, and one line in its `CLAUDE.md`.
-6. **Phase 8 — publish:** README with the eval numbers, `npm publish --provenance` from CI on a
+7. **Phase 8 — publish:** README with the eval numbers, `npm publish --provenance` from CI on a
    `v0.1.0` tag.
 
 ### Open, deliberately deferred (DESIGN §15)

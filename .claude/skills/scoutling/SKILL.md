@@ -57,8 +57,8 @@ doctor` exits nonzero when it finds a problem, so it is worth one run when anyth
 # Locate something, then read the cited lines yourself.
 scoutling "Where is the scope-root containment check implemented?" --model qwen/qwen3-coder-next
 
-# Give a wide-ranging question more room than the `normal` budget's 12 steps / 80 KB.
-# (`deep` is 24 steps / 200 KB — it wants a model context of 64 k or more.)
+# Give a wide-ranging question more room than the `normal` budget's 14 steps / 112 KB.
+# (`deep` is 28 steps / 256 KB — it wants a model context of 64 k or more.)
 scoutling "Map the tools and how they are assembled" --model qwen/qwen3-coder-next --budget deep
 
 # Machine-readable, and fail rather than return an answer that cites nothing checkable.
@@ -78,7 +78,7 @@ scoutling "How is config precedence resolved?" --model qwen/qwen3-coder-next --v
 
 - **An open "where is X?" is fair game.** The tool set is `list_dir`, `grep` and `read_file`, so
   the run can find its own way to a file. Naming the file when you already know it is still
-  cheaper — it saves a discovery step out of the eight.
+  cheaper — it saves a discovery step out of a `quick` run's eight.
 - **`grep` can return surrounding lines** (`contextLines`, 0-10), which is usually how a run
   should answer "what does this code do" instead of reading a whole file: on this repo a
   three-line context window costs ~540 bytes against ~17.7 KB for the equivalent `read_file`.
