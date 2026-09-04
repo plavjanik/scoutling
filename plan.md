@@ -175,7 +175,9 @@ run still passes on a citation that does not verify. Closing it means grading on
    - **Two new read-only inputs, each as an ADR beside 0002:** a fixed-argv `git show/log/diff`
      tool (no argv from the model), and a read-only `--attach <file>` for a saved diff or plan.
      Together they cover the 20 diff-review agents and the 15 % of runs that read evidence
-     outside the scope root.
+     outside the scope root. **ADR 0005 (attachments) written 2026-09-04**; its implementation
+     (`--attach`, `@name:line` citations, `maxAttachmentBytes`, `sources[].attachment`) is the
+     next code change. The git-tool ADR is still to be written.
    - **Grep `filesOnly` / `countOnly` and a negative glob** on `grep` and `list_dir`; counts in
      truncated results.
    - **Eval expansion after Phase 6 closes:** `eval/questions.screenwright.json` with the ten

@@ -7,9 +7,9 @@ Read, in this order, before changing anything:
 2. `CONTEXT.md` — the glossary. Use its terms exactly (Step not turn, Scope not workspace,
    Source vs Citation, Provider not backend). When you need a new term, add it there via the
    `domain-modeling` skill.
-3. `docs/adr/*.md` — four decisions that must not be "fixed": CLI not MCP; read-only by
+3. `docs/adr/*.md` — five decisions that must not be "fixed": CLI not MCP; read-only by
    absence of capability (never add a write tool or `--allow-edit`); provider-agnostic with no
-   default model; `@vscode/ripgrep`, never system `rg`.
+   default model; `@vscode/ripgrep`, never system `rg`; attachments are inputs, never scope.
 
 ## Status — read this first
 

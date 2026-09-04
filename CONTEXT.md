@@ -51,6 +51,12 @@ Prose from the scope, written for an AI reader, that is given to the model befor
 its answer follows the project's own conventions.
 _Avoid_: instructions, rules, memory, system context
 
+**Attachment**:
+A file the caller hands the run from outside the scope — a diff, a plan, a list of claims — as
+evidence to reason about. An attachment is an input, not part of the scope: no tool can list,
+search or read it, and it never widens where a run may look.
+_Avoid_: context file, extra path, sidecar, input file
+
 ### Bounding
 
 **Budget**:
@@ -74,14 +80,16 @@ The prose a run returns to the parent agent.
 _Avoid_: response, output, report, result
 
 **Citation**:
-A `path:line` reference inside the answer pointing at evidence in the scope. Every factual claim
-in an answer is expected to carry one.
+A `path:line` reference inside the answer pointing at evidence in the scope, or an
+`@name:line` reference pointing into an attachment. Every factual claim in an answer is expected
+to carry one.
 _Avoid_: reference, link, pointer
 
 **Source**:
-A citation after it has been checked against the scope. A source is either **verified** (the
-file and line exist) or **unverifiable** (they do not). Sources are what a parent agent uses to
-decide what to read next.
+A citation after it has been checked against the scope, or against the attachment it names. A
+source is either **verified** (the file and line exist) or **unverifiable** (they do not), and
+says whether it points into an attachment. Sources are what a parent agent uses to decide what
+to read next.
 _Avoid_: evidence, footnote, verified citation
 
 ### Configuration
