@@ -207,11 +207,15 @@ The summary's per-run table has an `auto` column and a `correct?` column, and th
 same thing**:
 
 - **`auto`** is mechanical: `pass` when every one of a question's `expect.mustMatch` regexes
-  matched the answer text, case-insensitively; `fail` when at least one did not; blank when the
-  question has no `expect` at all (there is nothing to check automatically). A regex match is
-  weak evidence — a model can accidentally include a matching substring, or match on a copy-pasted
-  code fragment rather than an actual, understood claim. **A `pass` here is evidence worth
-  checking, never a substitute for actually reading the answer.**
+  matched the answer text, case-insensitively, **and** at least one cited `path:line` verified
+  against the scope (the file exists and the line is in range); `fail` when either half fails —
+  a regex missed, or every citation was unverified or absent; blank when the question has no
+  `expect` at all (there is nothing to check automatically). A regex match is weak evidence — a
+  model can accidentally include a matching substring, or match on a copy-pasted code fragment
+  rather than an actual, understood claim — and the verified-citation half exists because the
+  reference run below (2026-08-28 to 08-30) produced passes that carried the right numbers while
+  citing nothing that resolved. **A `pass` here is evidence worth checking, never a substitute
+  for actually reading the answer.**
 - **`correct?`** is the human grader's column, and the harness always leaves it empty — including
   on every auto-graded row. Fill it in yourself after reading the answer (and, for a question with
   `expect`, its stated `fact`) against the actual source. The summary lists every auto-graded
@@ -246,10 +250,9 @@ are MLX 8-bit, loaded at a 262 144-token context.
 | `qwen/qwen3-next-80b` | 3/8 | 167 | 2 | **18 min** | **6 s** |
 
 Requiring a `path:line` token to auto-pass flipped two results from pass to fail; both were
-answers carrying the right numbers while citing nothing checkable. The residual gap is that the
-token proves the answer *contains* a citation, not that it *resolves*; closing it means grading
-on `verifiedSources` in the harness, which changes eval semantics and is recorded as an open
-decision in `plan.md`.
+answers carrying the right numbers while citing nothing checkable. Since 2026-09-04 an auto-pass
+also requires at least one citation that verifies against the scope; the results above were
+graded under the older token-only rule.
 
 ### Surveys (hand-graded, 5 questions × 2 runs)
 

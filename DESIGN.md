@@ -495,7 +495,8 @@ temp-0.5 run still exercises.
   Re-verify the facts before trusting a grade, and treat a question set as perishable.
 
 **Grading, scoped honestly:** the 4 questions with known facts carry an `expect.mustMatch` list
-of regexes, and the harness reports a mechanical `auto` verdict from them. That verdict is a
+of regexes, and the harness reports a mechanical `auto` verdict from them (and, since 2026-09-04,
+at least one verified citation). That verdict is a
 **proxy, never the grade**: the summary's `correct?` column is left empty on *every* row,
 auto-graded ones included, and is the human's. A regex can match a copy-pasted code fragment as
 easily as an understood claim. Each matcher is checked when written against both a plausible

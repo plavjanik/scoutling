@@ -163,8 +163,9 @@ run still passes on a citation that does not verify. Closing it means grading on
 ## 5. Next steps, in order
 
 1. ~~**Fix the five eval items** above.~~ Done 2026-09-04 in `local-ai/docs/scoutling-eval.json` (wording only; `mcp-server-boundary` also widened its scope to `apps/signals` and now asks for the excluded tools and the no-token path, since the narrow root had made it a 6-of-6 pass). Every fact in the new notes was re-checked against the source that day.
-2. **Decide auto-grade on `verifiedSources`** — one-line harness change; it alters eval semantics,
-   so it is a decision, not a cleanup.
+2. ~~**Decide auto-grade on `verifiedSources`.**~~ Decided 2026-09-04: an audit auto-passes only when
+   every `mustMatch` regex matches AND at least one citation verifies against the scope. The graded
+   results above were produced under the token-only rule.
 3. ~~**Third preset nudge.**~~ Done 2026-09-04: `normal` is 16 steps / 128 KB / 730 s (DESIGN §7 carries the derivation); `deep` left as is.
 4. ~~**Write the results** into `docs/eval.md` and the README.~~ Done 2026-09-04 (`docs/eval.md` "Results" section; README "Which model" and "Briefs"). Phase 6 is closed.
 5. **Phase 6b — decided 2026-09-03 from the subagent census** (`docs/subagent-census.md`; the

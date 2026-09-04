@@ -226,7 +226,11 @@ export interface EvalRunRecord {
   wallMs: number
   toolOutputBytes: number
   usage: { inputTokens: number | undefined; outputTokens: number | undefined }
-  /** 'pass' | 'fail' when the question has `expect`; null when it is graded manually. */
+  /**
+   * 'pass' | 'fail' when the question has `expect`; null when it is graded manually. `pass`
+   * requires both a regex match *and* at least one verified citation (2026-09-04) — see
+   * `autoGrade`'s doc comment for why the regex alone was not enough.
+   */
   autoGrade: 'pass' | 'fail' | null
 }
 
@@ -246,11 +250,17 @@ interface EvalModelResultFile {
  * `null` when the question has no `expect` — DESIGN §12/B1: the auto verdict
  * is `pass` only when *every* `mustMatch` regex matches the answer text,
  * case-insensitively (a small local model's casing is not the fact under
- * test).
+ * test), AND at least one citation verified against the scope. The
+ * verified-citation half was added 2026-09-04 after the reference run
+ * produced passes that carried the right numbers while citing nothing that
+ * resolved: a regex match only proves the answer *contains* a `path:line`
+ * token, not that it points at a real file/line, and a citation the caller
+ * can actually open is part of a correct audit answer under DESIGN §8.
  */
-function autoGrade(question: EvalQuestion, answer: string): 'pass' | 'fail' | null {
+function autoGrade(question: EvalQuestion, answer: string, verifiedSources: number): 'pass' | 'fail' | null {
   if (question.expect === undefined) return null
-  return question.expect.mustMatch.every((pattern) => new RegExp(pattern, 'i').test(answer)) ? 'pass' : 'fail'
+  const regexesMatch = question.expect.mustMatch.every((pattern) => new RegExp(pattern, 'i').test(answer))
+  return regexesMatch && verifiedSources >= 1 ? 'pass' : 'fail'
 }
 
 function buildOkRecord(
@@ -279,7 +289,7 @@ function buildOkRecord(
     wallMs: result.wallMs,
     toolOutputBytes: result.toolOutputBytes,
     usage: result.usage,
-    autoGrade: autoGrade(question, result.answer),
+    autoGrade: autoGrade(question, result.answer, result.citations.verifiedCount),
   }
 }
 
@@ -760,7 +770,8 @@ function buildSummaryMarkdown(
     '',
     '## How to grade',
     '',
-    'See docs/eval.md. The `auto` column is a regex proxy over the answer text, not a verdict —',
+    'See docs/eval.md. The `auto` column is a regex proxy over the answer text plus a check that',
+    'at least one citation verified, not a verdict —',
     'a `pass` there is evidence worth checking, not a correct answer. Fill in `correct?` yourself',
     'for every row, including the auto-graded ones.',
     '',

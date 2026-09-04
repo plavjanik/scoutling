@@ -16,8 +16,9 @@ Read, in this order, before changing anything:
 **Phases 1-6 of DESIGN.md §13 are done and green; Phase 6 closed 2026-09-04.** The reference eval
 has run and been graded across three models, the results are in `docs/eval.md` and the README, the
 presets were re-tuned three times from measurement, and brief mode shipped. What remains before
-`0.1.0`: one open eval decision (auto-grade on `verifiedSources`), the Phase 6b ADRs and eval
-expansion in `plan.md` §5, then Phases 7-8 (integrations, publish).
+`0.1.0`: the Phase 6b ADRs (`--attach`, a fixed-argv git tool) and eval expansion in `plan.md` §5,
+then Phases 7-8 (integrations, publish). An audit auto-passes only with a verified citation
+(decided 2026-09-04).
 
 Shipping today: `config.ts` (six layers + provenance), `provider.ts` (+ `listModels`),
 `guardrails.ts`, `scope-walk.ts` (+ the shared `isPathVisible`/`explainPathExclusion`), all three

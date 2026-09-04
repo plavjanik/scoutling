@@ -310,42 +310,61 @@ describe('runEval — question path scoping', () => {
 })
 
 describe('runEval — auto-grading', () => {
-  it('grades pass when every mustMatch regex matches (case-insensitively), fail when one misses, null with no expect', async () => {
-    await withTempDir(async (dir) => {
-      const path = writeQuestionFile(
-        dir,
-        basicQuestionFile({
-          questions: [
-            { id: 'will-pass', question: 'A?', expect: { fact: 'x', mustMatch: ['ANSWER', 'a\\.txt:1'] } },
-            { id: 'will-fail', question: 'B?', expect: { fact: 'y', mustMatch: ['nope-not-here'] } },
-            { id: 'no-expect', question: 'C?' },
-          ],
-        }),
-      )
-      const { io, files } = buildIo([
-        '--models',
-        'model-a',
-        '--questions',
-        path,
-        '--repo',
-        fixtureRepo,
-        '--temperatures',
-        '0',
-      ])
-      const code = await runEval(io)
-      expect(code).toBe(0)
+  it(
+    'grades pass only when every mustMatch regex matches (case-insensitively) AND at least one ' +
+      'citation verified; fail when regexes match but nothing verified; fail when a regex misses; ' +
+      'null with no expect',
+    async () => {
+      await withTempDir(async (dir) => {
+        const path = writeQuestionFile(
+          dir,
+          basicQuestionFile({
+            questions: [
+              { id: 'will-pass', question: 'A?', expect: { fact: 'x', mustMatch: ['ANSWER', 'a\\.txt:1'] } },
+              // Regressed by the reference run: an answer can contain a matching `path:line`
+              // token while citing nothing that actually resolves against the scope. Regex
+              // match alone must not be enough to auto-pass.
+              { id: 'will-fail-unverified', question: 'D?', expect: { fact: 'z', mustMatch: ['ANSWER', 'nope\\.txt:9'] } },
+              { id: 'will-fail', question: 'B?', expect: { fact: 'y', mustMatch: ['nope-not-here'] } },
+              { id: 'no-expect', question: 'C?' },
+            ],
+          }),
+        )
+        const { io, files } = buildIo(
+          ['--models', 'model-a', '--questions', path, '--repo', fixtureRepo, '--temperatures', '0'],
+          {
+            runQuestion: async (input) => {
+              if (input.question.id === 'will-fail-unverified') {
+                return fakeRunResult({
+                  answer: 'The ANSWER is here (nope.txt:9).',
+                  citations: {
+                    sources: [{ path: 'nope.txt', line: 9, verified: false }],
+                    verifiedCount: 0,
+                    unverifiedCount: 1,
+                    summaryLine: 'Sources: 1 unverified',
+                  },
+                })
+              }
+              return fakeRunResult()
+            },
+          },
+        )
+        const code = await runEval(io)
+        expect(code).toBe(0)
 
-      const modelFile = [...files.entries()].find(([filePath]) => filePath.endsWith('model-a.json'))
-      expect(modelFile).toBeDefined()
-      const parsed = JSON.parse(modelFile![1])
-      const grades = Object.fromEntries(
-        (parsed.runs as Array<{ questionId: string; autoGrade: string | null }>).map((run) => [run.questionId, run.autoGrade]),
-      )
-      expect(grades['will-pass']).toBe('pass')
-      expect(grades['will-fail']).toBe('fail')
-      expect(grades['no-expect']).toBeNull()
-    })
-  })
+        const modelFile = [...files.entries()].find(([filePath]) => filePath.endsWith('model-a.json'))
+        expect(modelFile).toBeDefined()
+        const parsed = JSON.parse(modelFile![1])
+        const grades = Object.fromEntries(
+          (parsed.runs as Array<{ questionId: string; autoGrade: string | null }>).map((run) => [run.questionId, run.autoGrade]),
+        )
+        expect(grades['will-pass']).toBe('pass')
+        expect(grades['will-fail-unverified']).toBe('fail')
+        expect(grades['will-fail']).toBe('fail')
+        expect(grades['no-expect']).toBeNull()
+      })
+    },
+  )
 })
 
 describe('runEval — error handling', () => {
