@@ -38,10 +38,13 @@ function answerOrEmptyState(result: RunResult): string {
 /**
  * DESIGN.md §9's documented JSON object, verbatim key set plus
  * `toolOutputBytes` (a Phase 4 addition the design doc's list predates —
- * Phase 6 tunes the budget presets from it, so it stays) and
- * `toolCallErrors` (the same kind of Phase 5 addition, for the same reason:
- * DESIGN.md §12's eval harness reads it off every run to tell which models
- * can reliably emit a well-formed tool call).
+ * Phase 6 tunes the budget presets from it, so it stays), `toolCallErrors`
+ * (the same kind of Phase 5 addition, for the same reason: DESIGN.md §12's
+ * eval harness reads it off every run to tell which models can reliably
+ * emit a well-formed tool call), and `sections` (a Phase 6 addition,
+ * DESIGN.md §8's brief mode: `result.sections` verbatim, so a caller grading
+ * a numbered brief gets each item's own citations without re-parsing the
+ * answer's markdown headings itself).
  *
  * Pretty-printed with a trailing newline: a parent agent's `jq` handles
  * either, but a human staring at raw CLI output during debugging does not.
@@ -50,6 +53,7 @@ export function formatAnswerJson(result: RunResult, model: string): string {
   const output = {
     answer: result.answer,
     sources: result.citations.sources,
+    sections: result.sections,
     model,
     usage: result.usage,
     stepsUsed: result.stepsUsed,

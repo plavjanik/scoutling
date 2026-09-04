@@ -22,6 +22,9 @@ function buildResult(overrides: Partial<RunResult> = {}): RunResult {
       unverifiedCount: 0,
       summaryLine: 'Sources: 1 verified',
     },
+    sections: [
+      { index: 1, heading: '', answer: 'The value is set (a.txt:1) at startup.', sources: [{ path: 'a.txt', line: 1, verified: true }] },
+    ],
     ...overrides,
   }
 }
@@ -94,6 +97,7 @@ describe('formatAnswerJson', () => {
       [
         'answer',
         'sources',
+        'sections',
         'model',
         'usage',
         'stepsUsed',
@@ -145,5 +149,41 @@ describe('formatAnswerJson', () => {
     const json = formatAnswerJson(result, 'my-model')
 
     expect(json).not.toContain('Sources:')
+  })
+
+  it('serialises each section with its own index, heading, answer and sources (DESIGN.md §8, brief mode)', () => {
+    const result = buildResult({
+      sections: [
+        {
+          index: 1,
+          heading: 'First item',
+          answer: 'Yes, see a.txt:1.',
+          sources: [{ path: 'a.txt', line: 1, verified: true }],
+        },
+        {
+          index: 2,
+          heading: 'Second item',
+          answer: 'Not found within budget.',
+          sources: [],
+        },
+      ],
+    })
+
+    const parsed = JSON.parse(formatAnswerJson(result, 'my-model'))
+
+    expect(parsed.sections).toEqual([
+      {
+        index: 1,
+        heading: 'First item',
+        answer: 'Yes, see a.txt:1.',
+        sources: [{ path: 'a.txt', line: 1, verified: true }],
+      },
+      {
+        index: 2,
+        heading: 'Second item',
+        answer: 'Not found within budget.',
+        sources: [],
+      },
+    ])
   })
 })

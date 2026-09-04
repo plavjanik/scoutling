@@ -36,7 +36,7 @@ scoutling doctor       # resolved config, which layer set each key, and what is 
 ```
 
 In text mode the answer goes to stdout, followed by one `Sources: N verified, ...` line.
-`--format json` gives `{answer, sources, model, usage, stepsUsed, toolCalls, exhausted,
+`--format json` gives `{answer, sources, sections, model, usage, stepsUsed, toolCalls, exhausted,
 timedOut, wallMs, toolOutputBytes}` instead, where `sources` is
 `[{path, line, endLine?, verified}]` — that array is the fastest way to decide what to read next.
 
@@ -84,7 +84,10 @@ scoutling "How is config precedence resolved?" --model qwen/qwen3-coder-next --v
   three-line context window costs ~540 bytes against ~17.7 KB for the equivalent `read_file`.
   The run decides that for itself, but a question phrased as "show me the lines around X" nudges
   it there.
-- **Ask one question per run.** One question, one answer, one budget.
+- **A numbered brief is fine.** Three to eight numbered items in one run come back as one heading
+  per item, and `--format json` carries a `sections` array with each item's own `sources`. Pair
+  three or more items with `--budget deep`; a brief shares its discovered files across items,
+  which three separate runs would each re-discover on one GPU.
 - **Ask for citations explicitly** if the answer will drive a change; the built-in prompt
   requires them, and saying so again makes small models comply more reliably. Add
   `--require-citations` to turn "cited nothing verifiable" into a nonzero exit instead of an

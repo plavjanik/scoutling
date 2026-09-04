@@ -1,9 +1,15 @@
-import { describe, expect, it, afterEach } from 'vitest'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { describe, expect, it, afterEach, vi } from 'vitest'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { extractCitations, verifyCitations } from '../src/citations.js'
+import { createCitationVerifier, extractCitations, verifyCitations } from '../src/citations.js'
+
+// Vitest cannot `vi.spyOn` Node's ESM built-ins directly ("Module namespace is not
+// configurable") — `{ spy: true }` wraps the real implementation instead of replacing it, so
+// every other test in this file that reads real fixture files keeps working unchanged; only the
+// call-count assertion below relies on the wrapping.
+vi.mock('node:fs', { spy: true })
 
 const fixtureScope = resolve(import.meta.dirname, 'fixtures/scope')
 
@@ -247,6 +253,31 @@ describe('verifyCitations', () => {
 
     const report = verifyCitations(scope, 'See nested/file.ts:2 for details.')
     expect(report.sources).toEqual([{ path: 'nested/file.ts', line: 2, verified: true }])
+  })
+})
+
+describe('createCitationVerifier', () => {
+  it('produces the same report as verifyCitations for the same scope root and answer', () => {
+    const verify = createCitationVerifier(fixtureScope)
+    const answer = 'See a.txt:1 and numbers.txt:1-3, plus does-not-exist.ts:1.'
+
+    expect(verify(answer)).toEqual(verifyCitations(fixtureScope, answer))
+  })
+
+  it('shares its line-count cache across calls: two answers citing the same file read it once', () => {
+    // This is the "prove the path it claims" case: without a shared cache, verifying two answers
+    // that both cite numbers.txt would read the file twice — once per call, exactly like calling
+    // verifyCitations(scopeRoot, answer) twice would. The factory's whole point is that it does
+    // not, so the assertion is on the read count, not merely on the reports being correct.
+    const verify = createCitationVerifier(fixtureScope)
+    const readSpy = vi.mocked(readFileSync)
+    readSpy.mockClear()
+
+    verify('See numbers.txt:1 for the first claim.')
+    verify('See numbers.txt:2 for a second, unrelated claim.')
+
+    const numbersFileReads = readSpy.mock.calls.filter(([path]) => String(path).endsWith('numbers.txt'))
+    expect(numbersFileReads).toHaveLength(1)
   })
 })
 

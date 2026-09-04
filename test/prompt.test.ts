@@ -50,6 +50,25 @@ describe('buildSystemPrompt', () => {
     })
   })
 
+  it('instructs numbered headings for a multi-item brief (brief mode, DESIGN.md §8)', () => {
+    withScope((scopeRoot) => {
+      const prompt = buildSystemPrompt({ scopeRoot })
+      expect(prompt).toMatch(/numbered/i)
+      expect(prompt).toMatch(/heading/i)
+    })
+  })
+
+  it('systemPromptOverride does not carry the brief-mode instruction', () => {
+    withScope((scopeRoot) => {
+      const prompt = buildSystemPrompt({
+        scopeRoot,
+        systemPromptOverride: 'You are a custom auditor. Only answer yes or no.',
+      })
+      expect(prompt).not.toMatch(/numbered/i)
+      expect(prompt).not.toMatch(/heading/i)
+    })
+  })
+
   it('includes a context file verbatim, under a Project context heading', () => {
     withScope((scopeRoot) => {
       writeFileSync(join(scopeRoot, 'CLAUDE.md'), 'Use two-space indentation everywhere.')

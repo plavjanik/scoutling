@@ -52,6 +52,9 @@ function fakeRunResult(overrides: Partial<RunResult> = {}): RunResult {
       unverifiedCount: 0,
       summaryLine: 'Sources: 1 verified',
     },
+    sections: [
+      { index: 1, heading: '', answer: 'The answer is here (a.txt:1).', sources: [{ path: 'a.txt', line: 1, verified: true }] },
+    ],
     ...overrides,
   }
 }

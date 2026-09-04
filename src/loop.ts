@@ -1,8 +1,9 @@
 import { generateText, isStepCount, type LanguageModel, type StepResult } from 'ai'
 
 import { type Budget, ToolOutputBudget, resolveBudget, withToolOutputBudget } from './budget.js'
-import { type CitationReport, verifyCitations } from './citations.js'
+import { type CitationReport, type Source, createCitationVerifier } from './citations.js'
 import { ScoutlingError } from './errors.js'
+import { type AnswerSection, splitSections } from './sections.js'
 import { createTools } from './tools/index.js'
 
 /** One step's summary, for `--verbose` step logging on stderr. */
@@ -83,6 +84,12 @@ export interface RunResult {
    * once, right after the loop that produced the text it checks.
    */
   citations: CitationReport
+  /**
+   * The answer split at its numbered headings (DESIGN.md §8, brief mode), each section carrying
+   * only the citations found in its own text. Always derivable from `answer` alone; kept on the
+   * result so a parent grading a five-item brief does not re-implement the split.
+   */
+  sections: Array<AnswerSection & { sources: Source[] }>
 }
 
 /** Tallies each tool call by name, generically rather than one hand-written filter per tool. */
@@ -156,6 +163,34 @@ function sumUsageField(values: Array<number | undefined>): number | undefined {
 }
 
 /**
+ * Compute `citations` and `sections` for one answer, shared by the normal-completion path and
+ * the salvaged-timeout path below so the two can never disagree about how a `RunResult` derives
+ * its answer report from its text. Both call this instead of `verifyCitations`/`splitSections`
+ * directly.
+ *
+ * Uses exactly one `createCitationVerifier` for the whole call: the top-level `citations` verify
+ * the full answer, and each of `sections` verifies its own slice of the same text through the
+ * same verifier, so a brief whose several items all cite the same file reads that file once, not
+ * once per item plus once more for the whole-answer report. Top-level `sources` is deliberately
+ * computed from the whole answer text rather than by concatenating the per-section `sources` —
+ * the two use different de-duplication universes (whole-answer vs. per-section), and answer text
+ * outside any section (an `index: 0` preamble, or an answer with no numbered heading at all)
+ * still needs to reach the top-level report even though it is not "inside" any section's slice.
+ */
+function buildAnswerReport(
+  scopeRoot: string,
+  answer: string,
+): { citations: CitationReport; sections: RunResult['sections'] } {
+  const verify = createCitationVerifier(scopeRoot)
+  const citations = verify(answer)
+  const sections = splitSections(answer).map((section) => ({
+    ...section,
+    sources: verify(section.answer).sources,
+  }))
+  return { citations, sections }
+}
+
+/**
  * Run one investigation: a bounded `generateText` tool loop with the three
  * read-only tools (`read_file`, `list_dir`, `grep`). Takes an
  * already-constructed model so the same function serves both the CLI (a
@@ -214,7 +249,7 @@ export async function runScoutling(options: RunOptions): Promise<RunResult> {
       }
     }
 
-    const citations = verifyCitations(options.scopeRoot, answer)
+    const { citations, sections } = buildAnswerReport(options.scopeRoot, answer)
 
     const exhaustedBy: RunResult['exhaustedBy'] = ['timeout']
     if (toolOutputBudget.exhausted) exhaustedBy.push('bytes')
@@ -234,6 +269,7 @@ export async function runScoutling(options: RunOptions): Promise<RunResult> {
       toolOutputBytes: toolOutputBudget.spent,
       toolCallErrors: countToolCallErrors(completedSteps),
       citations,
+      sections,
     }
   }
 
@@ -309,7 +345,7 @@ export async function runScoutling(options: RunOptions): Promise<RunResult> {
   if (result.finishReason === 'tool-calls') exhaustedBy.push('steps')
   if (toolOutputBudget.exhausted) exhaustedBy.push('bytes')
 
-  const citations = verifyCitations(options.scopeRoot, result.text)
+  const { citations, sections } = buildAnswerReport(options.scopeRoot, result.text)
 
   return {
     answer: result.text,
@@ -326,5 +362,6 @@ export async function runScoutling(options: RunOptions): Promise<RunResult> {
     toolOutputBytes: toolOutputBudget.spent,
     toolCallErrors: countToolCallErrors(result.steps),
     citations,
+    sections,
   }
 }

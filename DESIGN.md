@@ -360,7 +360,9 @@ scoutling init <claude-code|codex|opencode|cursor>   # v1.1 — writes the integ
   run's JSON, as does `exhaustedBy` (Phase 6 follow-up, 2026-08-28): an array of which cap(s) cut
   the run short — `"steps"`, `"bytes"`, `"timeout"`, any subset, in no particular order — since
   more than one can fire on a single run. `exhausted` stays the boolean summary
-  (`exhaustedBy.length > 0`).
+  (`exhaustedBy.length > 0`). `sections` is a further Phase 6 addition, same postdate-the-list
+  status as the other two: the answer split at its numbered headings (brief mode, below), each
+  entry `{index, heading, answer, sources}`.
 - `--verbose`: per-step log to stderr (tool name, args summary, bytes returned).
 - **Errors** are one-line JSON on stderr with a code, and map to exit codes:
   `0` ok · `1` answered but budget exhausted / no verified citations under `--require-citations`

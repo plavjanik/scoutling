@@ -569,6 +569,7 @@ describe('runCli', () => {
         'exhaustedBy',
         'model',
         'sources',
+        'sections',
         'stepsUsed',
         'timedOut',
         'toolCallErrors',

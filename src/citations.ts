@@ -232,14 +232,9 @@ function buildSummaryLine(verifiedCount: number, unverified: Source[]): string {
   return `Sources: ${verifiedCount} verified, ${unverified.length} unverifiable (${listed.join(', ')})`
 }
 
-/**
- * Extract every citation from `answer` and check it against `scopeRoot`. No model call — this is
- * the structural half of DESIGN.md §8's cited-answer contract; `--require-citations` (a later
- * slice) decides what to do with a report that has zero verified sources.
- */
-export function verifyCitations(scopeRoot: string, answer: string): CitationReport {
+/** Shared body of `verifyCitations` and `createCitationVerifier` — the only difference between them is whether `cache` is fresh per call or shared across many. */
+function verifyCitationsWithCache(scopeRoot: string, answer: string, cache: LineCountCache): CitationReport {
   const candidates = extractCitations(answer)
-  const cache: LineCountCache = new Map()
   const sources = candidates.map((candidate) => verifyOne(scopeRoot, candidate, cache))
 
   const verifiedCount = sources.filter((source) => source.verified).length
@@ -251,4 +246,28 @@ export function verifyCitations(scopeRoot: string, answer: string): CitationRepo
     unverifiedCount: unverified.length,
     summaryLine: buildSummaryLine(verifiedCount, unverified),
   }
+}
+
+/**
+ * Extract every citation from `answer` and check it against `scopeRoot`. No model call — this is
+ * the structural half of DESIGN.md §8's cited-answer contract; `--require-citations` (a later
+ * slice) decides what to do with a report that has zero verified sources.
+ */
+export function verifyCitations(scopeRoot: string, answer: string): CitationReport {
+  return verifyCitationsWithCache(scopeRoot, answer, new Map())
+}
+
+/**
+ * A verifier bound to one scope root that shares its line-count cache across calls.
+ *
+ * DESIGN.md §8's brief mode (`sections.ts`) verifies an answer once as a whole for the top-level
+ * `citations` report, and then verifies each of its sections again for that section's own
+ * `sources` — a five-item brief that all cites the same large file would otherwise read that file
+ * once per verification (six times: once whole-answer, once per section) instead of once. The
+ * factory exists so a caller doing that repeated verification against one scope root pays for the
+ * read exactly once, no matter how many times the returned function is called.
+ */
+export function createCitationVerifier(scopeRoot: string): (answer: string) => CitationReport {
+  const cache: LineCountCache = new Map()
+  return (answer: string) => verifyCitationsWithCache(scopeRoot, answer, cache)
 }

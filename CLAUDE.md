@@ -20,9 +20,9 @@ grading, and a second preset re-tune — which the first model's numbers already
 Shipping today: `config.ts` (six layers + provenance), `provider.ts` (+ `listModels`),
 `guardrails.ts`, `scope-walk.ts` (+ the shared `isPathVisible`/`explainPathExclusion`), all three
 tools (`tools/read-file.ts`, `tools/list-dir.ts`, `tools/grep.ts`, assembled by `tools/index.ts`),
-`prompt.ts`, `loop.ts` (`runScoutling`), `budget.ts`, `citations.ts`, `toon.ts`, `output.ts`,
+`prompt.ts`, `loop.ts` (`runScoutling`), `budget.ts`, `citations.ts`, `sections.ts`, `toon.ts`, `output.ts`,
 `commands.ts`, `run-setup.ts`, `classify-run-error.ts`, `cli.ts` (`runCli`, injectable I/O),
-`script/smoke.ts`, and `eval/run-eval.ts` (`pnpm eval`). **390 hermetic tests, 21 files.**
+`script/smoke.ts`, and `eval/run-eval.ts` (`pnpm eval`). **421 hermetic tests, 22 files.**
 `pnpm smoke` passes live on `qwen/qwen3-coder-next` **on the shipped defaults** — it no longer
 needs `--budget deep` or `--timeout-ms`.
 
@@ -67,6 +67,12 @@ Four things worth carrying, all of which cost real time to learn:
 `qwen3.6-27b`, both `qwen3_5`-arch VLMs, are ~10x slower per step and time out on most cells, and
 `qwen3.8-27b` reproducibly takes LM Studio down at the identical cell on three attempts. Memory,
 quantization and co-tenant contention were each tested and eliminated as causes.
+
+**Brief mode shipped 2026-09-04** (Phase 6b item 1, from `docs/subagent-census.md`): the built-in prompt
+asks for one numbered heading per item of a multi-question brief; `sections.ts` splits the answer at
+those headings (ATX or bold, numbers kept as written, nothing dropped); `RunResult.sections` carries
+each section's own `sources`, verified through one shared `createCitationVerifier` so a brief that
+cites the same file five times reads it once; `--format json` emits `sections` after `sources`.
 
 **What remains in Phase 6:** write the results into `docs/eval.md` and the README, fix five defects
 the grading exposed in the eval *items* themselves, and a small `normal` nudge (~16 steps /

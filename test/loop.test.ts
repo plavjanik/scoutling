@@ -570,6 +570,148 @@ describe('runScoutling', () => {
     })
   })
 
+  it('splits a multi-item brief answer into sections, each with its own sources', async () => {
+    // Three numbered sections: two cite a.txt at a valid line, one reports
+    // nothing found and cites nothing. The top-level `citations` must still
+    // be the whole-answer, de-duplicated report (both citations here are to
+    // the same a.txt:1, so that de-duplicates to one verified source).
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => ({
+        content: [
+          {
+            type: 'text' as const,
+            text: [
+              '## 1. Does a.txt exist?',
+              'Yes, see a.txt:1.',
+              '',
+              '## 2. Is there a b.txt?',
+              'Not found within budget.',
+              '',
+              '## 3. What does a.txt say again?',
+              'Same file, see a.txt:1.',
+            ].join('\n'),
+          },
+        ],
+        finishReason: { unified: 'stop' as const, raw: undefined },
+        usage: usage(),
+        warnings: [],
+      }),
+    })
+
+    const result = await runScoutling({
+      question: '1. Does a.txt exist?\n2. Is there a b.txt?\n3. What does a.txt say again?',
+      scopeRoot,
+      model,
+      budget: { maxSteps: 5 },
+    })
+
+    expect(result.sections).toHaveLength(3)
+    expect(result.sections.map((s) => s.index)).toEqual([1, 2, 3])
+
+    expect(result.sections[0]?.sources).toHaveLength(1)
+    expect(result.sections[0]?.sources[0]).toMatchObject({ path: 'a.txt', line: 1, verified: true })
+
+    expect(result.sections[1]?.sources).toHaveLength(0)
+
+    expect(result.sections[2]?.sources).toHaveLength(1)
+    expect(result.sections[2]?.sources[0]).toMatchObject({ path: 'a.txt', line: 1, verified: true })
+
+    // Top-level citations de-duplicate over the whole answer text, exactly
+    // as they did before sections existed — the same a.txt:1 cited twice is
+    // still one verified source at the top level.
+    expect(result.citations.sources).toHaveLength(1)
+    expect(result.citations.verifiedCount).toBe(1)
+  })
+
+  it('populates sections on the salvaged-timeout path too, proven by asserting timedOut: true in the same test', async () => {
+    // Mirrors "a timeout that fires after steps completed salvages a
+    // RunResult instead of throwing" above, but step 2's text carries a
+    // numbered heading so this proves the salvage path runs the answer
+    // through buildAnswerReport (sections + citations) rather than only
+    // through citations.
+    let call = 0
+    const model = new MockLanguageModelV4({
+      doGenerate: async (opts) => {
+        call += 1
+        if (call === 1) {
+          return {
+            content: [
+              {
+                type: 'tool-call' as const,
+                toolCallId: 'call-1',
+                toolName: 'read_file',
+                input: JSON.stringify({ path: 'a.txt' }),
+              },
+            ],
+            finishReason: { unified: 'tool-calls' as const, raw: undefined },
+            usage: usage(),
+            warnings: [],
+          }
+        }
+        if (call === 2) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: ['## 1. First item', 'Partial answer, see a.txt:1.'].join('\n'),
+              },
+              {
+                type: 'tool-call' as const,
+                toolCallId: 'call-2',
+                toolName: 'read_file',
+                input: JSON.stringify({ path: 'sub/nested.txt' }),
+              },
+            ],
+            finishReason: { unified: 'tool-calls' as const, raw: undefined },
+            usage: usage(),
+            warnings: [],
+          }
+        }
+        // Third call onward: never settles on its own.
+        await new Promise((_resolve, reject) => {
+          opts.abortSignal?.addEventListener('abort', () => {
+            reject(Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }))
+          })
+        })
+        throw new Error('unreachable: the promise above never resolves')
+      },
+    })
+
+    const result = await runScoutling({
+      question: 'Investigate slowly.',
+      scopeRoot,
+      model,
+      budget: { maxSteps: 10, timeoutMs: 40 },
+    })
+
+    expect(result.timedOut).toBe(true)
+    expect(result.answer).toBe('## 1. First item\nPartial answer, see a.txt:1.')
+    expect(result.sections).toHaveLength(1)
+    expect(result.sections[0]).toMatchObject({ index: 1, heading: 'First item' })
+    expect(result.sections[0]?.sources).toHaveLength(1)
+    expect(result.sections[0]?.sources[0]).toMatchObject({ path: 'a.txt', line: 1, verified: true })
+  })
+
+  it('a blank answer gives sections: []', async () => {
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => ({
+        content: [{ type: 'text' as const, text: '   ' }],
+        finishReason: { unified: 'stop' as const, raw: undefined },
+        usage: usage(),
+        warnings: [],
+      }),
+    })
+
+    const result = await runScoutling({
+      question: 'Say nothing.',
+      scopeRoot,
+      model,
+      budget: { maxSteps: 5 },
+    })
+
+    expect(result.sections).toEqual([])
+  })
+
   it('the TIMEOUT error is a real ScoutlingError instance with a helpful hint', async () => {
     const model = new MockLanguageModelV4({
       doGenerate: async (opts) => {
