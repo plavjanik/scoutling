@@ -9,6 +9,26 @@ import { resolveScopeRoot } from '../src/guardrails.js'
 import { ScoutlingError } from '../src/errors.js'
 import { BUDGET_PRESETS, TOOL_CALL_RESERVATION_BYTES } from '../src/budget.js'
 import { createReadFileTool } from '../src/tools/read-file.js'
+import type { Attachment } from '../src/attachments.js'
+
+/**
+ * Pulls the plain text of the user message out of a `MockLanguageModelV4` call's `opts.prompt`
+ * (a `LanguageModelV4Prompt`: an array of messages, each with `content` as either a string or an
+ * array of parts) — the only way to see exactly what text `runScoutling` sent, proving the
+ * attachments block/question assembly rather than only asserting on the resulting `RunResult`.
+ */
+function userPromptText(prompt: unknown): string {
+  const messages = prompt as Array<{ role: string; content: unknown }>
+  const userMessage = messages.find((message) => message.role === 'user')
+  const content = userMessage?.content
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .map((part: { type?: string; text?: string }) => (part.type === 'text' ? (part.text ?? '') : ''))
+      .join('')
+  }
+  return ''
+}
 
 const scopeRoot = resolveScopeRoot(resolve(import.meta.dirname, 'fixtures/scope'))
 
@@ -733,6 +753,106 @@ describe('runScoutling', () => {
       expect(scoutlingError.code).toBe('TIMEOUT')
       expect(scoutlingError.hint).toMatch(/cold-load|timeout-ms/i)
     }
+  })
+})
+
+describe('runScoutling — attachments (ADR 0005)', () => {
+  it('with no attachments, the user prompt is exactly the question, unchanged from before attachments existed', async () => {
+    let capturedPrompt: unknown
+    const model = new MockLanguageModelV4({
+      doGenerate: async (opts) => {
+        capturedPrompt = opts.prompt
+        return {
+          content: [{ type: 'text' as const, text: 'Done.' }],
+          finishReason: { unified: 'stop' as const, raw: undefined },
+          usage: usage(),
+          warnings: [],
+        }
+      },
+    })
+
+    await runScoutling({
+      question: 'Plain question, no attachments.',
+      scopeRoot,
+      model,
+      budget: { maxSteps: 5 },
+    })
+
+    expect(userPromptText(capturedPrompt)).toBe('Plain question, no attachments.')
+  })
+
+  it('places the attachments block before the question, verbatim, in the user prompt', async () => {
+    let capturedPrompt: unknown
+    const model = new MockLanguageModelV4({
+      doGenerate: async (opts) => {
+        capturedPrompt = opts.prompt
+        return {
+          content: [{ type: 'text' as const, text: 'See the second line (@notes.md:2).' }],
+          finishReason: { unified: 'stop' as const, raw: undefined },
+          usage: usage(),
+          warnings: [],
+        }
+      },
+    })
+
+    const attachments: Attachment[] = [
+      { name: 'notes.md', path: '/tmp/notes.md', content: 'first\nsecond\n', totalLines: 2 },
+    ]
+
+    const result = await runScoutling({
+      question: 'What is in notes.md?',
+      scopeRoot,
+      model,
+      budget: { maxSteps: 5 },
+      attachments,
+    })
+
+    const text = userPromptText(capturedPrompt)
+    expect(text.startsWith('Attachments:')).toBe(true)
+    expect(text).toContain('### @notes.md (2 lines)')
+    expect(text).toContain('   1→first')
+    expect(text).toContain('   2→second')
+    expect(text.endsWith('What is in notes.md?')).toBe(true)
+    expect(text.indexOf('### @notes.md')).toBeLessThan(text.indexOf('What is in notes.md?'))
+
+    // An answer citing @notes.md:2 verifies against the attachment, not the filesystem.
+    expect(result.citations.sources).toContainEqual({
+      path: '@notes.md',
+      line: 2,
+      attachment: true,
+      verified: true,
+    })
+    expect(result.citations.verifiedScopeCount).toBe(0)
+  })
+
+  it('an attachment citation past the end of the file is unverified, with no filesystem access', async () => {
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => ({
+        content: [{ type: 'text' as const, text: 'See line 9 (@notes.md:9).' }],
+        finishReason: { unified: 'stop' as const, raw: undefined },
+        usage: usage(),
+        warnings: [],
+      }),
+    })
+
+    const attachments: Attachment[] = [
+      { name: 'notes.md', path: '/tmp/notes.md', content: 'first\nsecond\n', totalLines: 2 },
+    ]
+
+    const result = await runScoutling({
+      question: 'What is in notes.md?',
+      scopeRoot,
+      model,
+      budget: { maxSteps: 5 },
+      attachments,
+    })
+
+    expect(result.citations.sources).toContainEqual({
+      path: '@notes.md',
+      line: 9,
+      attachment: true,
+      verified: false,
+    })
   })
 })
 

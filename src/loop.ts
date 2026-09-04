@@ -1,5 +1,6 @@
 import { generateText, isStepCount, type LanguageModel, type StepResult } from 'ai'
 
+import { type Attachment, renderAttachmentsBlock } from './attachments.js'
 import { type Budget, ToolOutputBudget, resolveBudget, withToolOutputBudget } from './budget.js'
 import { type CitationReport, type Source, createCitationVerifier } from './citations.js'
 import { ScoutlingError } from './errors.js'
@@ -31,6 +32,13 @@ export interface RunOptions {
   systemPrompt?: string
   /** Passed through to `createTools`; config's excludeGlobs, never the model's. */
   excludeGlobs?: string[]
+  /**
+   * ADR 0005: files the caller handed the run from outside the scope, rendered into the user
+   * prompt ahead of the question (`renderAttachmentsBlock`) and never touched by any tool. The
+   * system prompt is deliberately unchanged by their presence — DESIGN.md §12's eval measures the
+   * same built-in prompt whether or not a run carries attachments.
+   */
+  attachments?: Attachment[]
   onStep?: (step: StepSummary) => void
 }
 
@@ -180,8 +188,9 @@ function sumUsageField(values: Array<number | undefined>): number | undefined {
 function buildAnswerReport(
   scopeRoot: string,
   answer: string,
+  attachments: Attachment[] | undefined,
 ): { citations: CitationReport; sections: RunResult['sections'] } {
-  const verify = createCitationVerifier(scopeRoot)
+  const verify = createCitationVerifier(scopeRoot, attachments)
   const citations = verify(answer)
   const sections = splitSections(answer).map((section) => ({
     ...section,
@@ -249,7 +258,7 @@ export async function runScoutling(options: RunOptions): Promise<RunResult> {
       }
     }
 
-    const { citations, sections } = buildAnswerReport(options.scopeRoot, answer)
+    const { citations, sections } = buildAnswerReport(options.scopeRoot, answer, options.attachments)
 
     const exhaustedBy: RunResult['exhaustedBy'] = ['timeout']
     if (toolOutputBudget.exhausted) exhaustedBy.push('bytes')
@@ -273,6 +282,16 @@ export async function runScoutling(options: RunOptions): Promise<RunResult> {
     }
   }
 
+  // ADR 0005: the attachments block, when there is one, goes ahead of the question in the *user*
+  // prompt — the system prompt is untouched, so DESIGN.md §12's eval keeps measuring the same
+  // built-in prompt regardless of whether a run carries attachments. `renderAttachmentsBlock`
+  // itself returns '' for an empty/absent list, so a run with none builds byte-for-byte the same
+  // prompt as before attachments existed.
+  const userPrompt =
+    options.attachments && options.attachments.length > 0
+      ? `${renderAttachmentsBlock(options.attachments)}${options.question}`
+      : options.question
+
   // Declared with no annotation so TypeScript infers it from the assignment
   // below, keeping the tool-typed result rather than the SDK's placeholder.
   let result
@@ -282,7 +301,7 @@ export async function runScoutling(options: RunOptions): Promise<RunResult> {
       tools,
       stopWhen: isStepCount(budget.maxSteps),
       ...(options.systemPrompt !== undefined ? { system: options.systemPrompt } : {}),
-      prompt: options.question,
+      prompt: userPrompt,
       temperature: options.temperature,
       maxOutputTokens: budget.maxOutputTokens,
       abortSignal,
@@ -345,7 +364,7 @@ export async function runScoutling(options: RunOptions): Promise<RunResult> {
   if (result.finishReason === 'tool-calls') exhaustedBy.push('steps')
   if (toolOutputBudget.exhausted) exhaustedBy.push('bytes')
 
-  const { citations, sections } = buildAnswerReport(options.scopeRoot, result.text)
+  const { citations, sections } = buildAnswerReport(options.scopeRoot, result.text, options.attachments)
 
   return {
     answer: result.text,

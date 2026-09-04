@@ -82,6 +82,7 @@ describe('parseArgs', () => {
       help: false,
       verbose: true,
       requireCitations: false,
+      attach: [],
       question: 'What does resolvePath do?',
       model: 'qwen/qwen3-coder-next',
       path: '/tmp/repo',
@@ -179,6 +180,34 @@ describe('parseArgs', () => {
 
   it('rejects --timeout-ms abc (non-integer)', () => {
     expect(() => parseArgs(['a question', '--timeout-ms', 'abc'])).toThrow(ScoutlingError)
+  })
+
+  it('defaults --attach to [] when not given', () => {
+    const args = parseArgs(['a question'])
+    expect(args.attach).toEqual([])
+  })
+
+  it('collects repeated --attach in order', () => {
+    const args = parseArgs(['a question', '--attach', 'diff.patch', '--attach', 'plan.md'])
+    expect(args.attach).toEqual(['diff.patch', 'plan.md'])
+  })
+
+  it('rejects --attach with a missing value', () => {
+    expect(() => parseArgs(['a question', '--attach'])).toThrow(ScoutlingError)
+    try {
+      parseArgs(['a question', '--attach'])
+    } catch (error) {
+      expect((error as ScoutlingError).code).toBe('BAD_ARGS')
+    }
+  })
+
+  it('parses --max-attach-bytes as a number', () => {
+    const args = parseArgs(['a question', '--max-attach-bytes', '1000'])
+    expect(args.maxAttachBytes).toBe(1000)
+  })
+
+  it('rejects --max-attach-bytes 0', () => {
+    expect(() => parseArgs(['a question', '--max-attach-bytes', '0'])).toThrow(ScoutlingError)
   })
 
   it('parses --help with no question required', () => {
@@ -776,6 +805,91 @@ describe('runCli', () => {
     const budgetWarning = warnings.find((warning) => warning.warning === 'BUDGET_EXHAUSTED')
     expect(budgetWarning).toBeDefined()
     expect(budgetWarning.message).toContain('timeout')
+  })
+})
+
+describe('runCli: --attach (ADR 0005)', () => {
+  it('a missing attachment file exits BAD_ARGS (2), before touching config or the provider', async () => {
+    const io = captureIO()
+    let fetchCalled = false
+    const fetchImpl = (async () => {
+      fetchCalled = true
+      throw new Error('should never be called')
+    }) as unknown as typeof fetch
+
+    const exitCode = await runCli({
+      argv: ['a question', '--model', 'a-model', '--attach', 'does-not-exist.diff'],
+      fetch: fetchImpl,
+      writeStdout: io.writeStdout,
+      writeStderr: io.writeStderr,
+    })
+
+    expect(exitCode).toBe(2)
+    const error = JSON.parse(io.stderr.join(''))
+    expect(error.error).toBe('BAD_ARGS')
+    expect(error.message).toContain('attachment not found')
+    expect(fetchCalled).toBe(false)
+  })
+
+  it('resolves a relative --attach path against the injected cwd', async () => {
+    const injectedCwd = mkdtempSync(join(tmpdir(), 'scoutling-cli-attach-cwd-'))
+    try {
+      writeFileSync(join(injectedCwd, 'notes.md'), 'first\nsecond\n')
+
+      const io = captureIO()
+      const fetchImpl = (async () =>
+        textCompletionResponse('See the note (@notes.md:2).')) as unknown as typeof fetch
+
+      const exitCode = await runCli({
+        argv: ['a question', '--model', 'a-model', '--path', fixtureScopeRoot, '--attach', 'notes.md', '--format', 'json'],
+        cwd: injectedCwd,
+        fetch: fetchImpl,
+        writeStdout: io.writeStdout,
+        writeStderr: io.writeStderr,
+      })
+
+      expect(exitCode).toBe(0)
+      const parsed = JSON.parse(io.stdout.join(''))
+      expect(parsed.sources).toContainEqual({ path: '@notes.md', line: 2, attachment: true, verified: true })
+    } finally {
+      rmSync(injectedCwd, { recursive: true, force: true })
+    }
+  })
+
+  it('--require-citations with an answer whose only verified source is an attachment still warns NO_VERIFIED_CITATIONS and exits 1', async () => {
+    const injectedCwd = mkdtempSync(join(tmpdir(), 'scoutling-cli-attach-cwd-'))
+    try {
+      writeFileSync(join(injectedCwd, 'notes.md'), 'first\nsecond\n')
+
+      const io = captureIO()
+      const fetchImpl = (async () =>
+        textCompletionResponse('See the note (@notes.md:2).')) as unknown as typeof fetch
+
+      const exitCode = await runCli({
+        argv: [
+          'a question',
+          '--model',
+          'a-model',
+          '--path',
+          fixtureScopeRoot,
+          '--attach',
+          'notes.md',
+          '--require-citations',
+        ],
+        cwd: injectedCwd,
+        fetch: fetchImpl,
+        writeStdout: io.writeStdout,
+        writeStderr: io.writeStderr,
+      })
+
+      expect(exitCode).toBe(1)
+      const warnings = io.stderr.map((line) => JSON.parse(line))
+      const warning = warnings.find((w) => w.warning === 'NO_VERIFIED_CITATIONS')
+      expect(warning).toBeDefined()
+      expect(warning.message).toContain('attachments do not count')
+    } finally {
+      rmSync(injectedCwd, { recursive: true, force: true })
+    }
   })
 })
 

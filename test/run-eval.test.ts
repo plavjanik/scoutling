@@ -49,6 +49,7 @@ function fakeRunResult(overrides: Partial<RunResult> = {}): RunResult {
     citations: {
       sources: [{ path: 'a.txt', line: 1, verified: true }],
       verifiedCount: 1,
+      verifiedScopeCount: 1,
       unverifiedCount: 0,
       summaryLine: 'Sources: 1 verified',
     },
@@ -340,6 +341,7 @@ describe('runEval — auto-grading', () => {
                   citations: {
                     sources: [{ path: 'nope.txt', line: 9, verified: false }],
                     verifiedCount: 0,
+                    verifiedScopeCount: 0,
                     unverifiedCount: 1,
                     summaryLine: 'Sources: 1 unverified',
                   },

@@ -34,8 +34,9 @@ way — a parent agent trusts that everything a run *found* came from the scope 
   verified against the attachment and reported in `sources` with `attachment: true`; it is a
   source, but never evidence about the scope.
 - Attachments count against the model's context, not the tool-byte budget, so they are capped
-  separately: `maxAttachmentBytes` (default 64 000, `--max-attach-bytes` to override). An
-  attachment over the cap is refused with `BAD_ARGS` and a hint to split it — never silently
+  separately: `maxAttachmentBytes` (default 64 000, `--max-attach-bytes` to override), checked
+  against the **sum** of every attachment's bytes, not each one individually. Attachments whose
+  total exceeds the cap are refused with `BAD_ARGS` and a hint to split them — never silently
   truncated (the never-degrade-silently rule).
 - Two attachments with the same basename are a `BAD_ARGS` error, since `@<name>` would be
   ambiguous.

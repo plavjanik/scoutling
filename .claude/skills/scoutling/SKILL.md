@@ -30,6 +30,7 @@ context on the conclusion rather than the search.
 scoutling "<question>" --model <id> [--path <dir>] [--base-url <url>]
           [--budget quick|normal|deep] [--max-steps <n>] [--max-tool-bytes <n>] [--timeout-ms <n>]
           [--format text|json] [--require-citations] [--verbose]
+          [--attach <file>]... [--max-attach-bytes <n>]
 scoutling -            # read the question from stdin, for a long prompt
 scoutling models       # what can I pass to --model on this machine?
 scoutling doctor       # resolved config, which layer set each key, and what is broken
@@ -94,6 +95,10 @@ scoutling "How is config precedence resolved?" --model qwen/qwen3-coder-next --v
   answer you have to eyeball.
 - **A citation needs a line number to count.** Only `path:line` and `path:line-line` are
   extracted and verified — a bare filename in the prose is not reported as a source at all.
+- **Hand it a diff or a plan with `--attach`.** The file is placed in the prompt as evidence,
+  cited as `@name:line`, and never widens the scope; `sources[]` marks such citations
+  `attachment: true`. Default cap 64 KB total; a review of a 3,500-line diff needs
+  `--max-attach-bytes`.
 
 ## Reading the result
 

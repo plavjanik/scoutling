@@ -2,6 +2,7 @@
 import { isAbsolute, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
+import { DEFAULT_MAX_ATTACHMENT_BYTES, loadAttachments, type Attachment } from './attachments.js'
 import { isBudgetPreset, resolveBudget } from './budget.js'
 import { classifyRunError } from './classify-run-error.js'
 import { runDoctorCommand, runModelsCommand } from './commands.js'
@@ -19,6 +20,7 @@ const USAGE = `🐦 scoutling — read-only, bounded codebase investigation with
 scoutling "<question>" --model <id> [--path <dir>] [--base-url <url>] [--api-key <key>]
           [--budget quick|normal|deep] [--max-steps <n>] [--max-tool-bytes <n>] [--timeout-ms <n>]
           [--format text|json] [--require-citations] [--verbose]
+          [--attach <file>]... [--max-attach-bytes <n>]
 scoutling -                    Read the question from stdin instead of an argument (long
                                 prompts from a parent agent). Empty/whitespace-only stdin is
                                 an error.
@@ -46,6 +48,9 @@ directory) and prints a cited answer to stdout.
   --format <fmt>        text (default) or json — see DESIGN.md §9 for the json object's shape.
   --require-citations   Exit 1 if the answer verifies zero citations against the scope.
   --verbose             Log one line per step to stderr (tool name, args, bytes returned).
+  --attach <file>       Give the run a file from outside the scope as evidence; repeatable.
+                        Cite as @name:line — never listed, searched or read by a tool (ADR 0005).
+  --max-attach-bytes <n> Cap on the sum of every --attach file's bytes. Default: 64000.
   --help                Print this message and exit 0.
 
 Note: "scoutling models" and "scoutling doctor" are recognised as subcommands only when the
@@ -75,6 +80,9 @@ export interface ParsedArgs {
   maxSteps?: number
   maxToolBytes?: number
   timeoutMs?: number
+  /** Every `--attach <file>`, in the order given. Always present (`[]` by default), not optional — ADR 0005 is a caller-only surface, so there is no config/env layer to merge with. */
+  attach: string[]
+  maxAttachBytes?: number
   /**
    * Validated here, unlike `budget`: `--format` has no config-file/env layer
    * to merge with, so there is no reason to defer the check the way
@@ -96,6 +104,7 @@ const NUMERIC_FLAGS = {
   '--max-steps': 'maxSteps',
   '--max-tool-bytes': 'maxToolBytes',
   '--timeout-ms': 'timeoutMs',
+  '--max-attach-bytes': 'maxAttachBytes',
 } as const
 
 const BOOLEAN_FLAGS = {
@@ -110,7 +119,7 @@ const BOOLEAN_FLAGS = {
  * (AXI principle: an unknown flag is an error, never silently ignored).
  */
 export function parseArgs(argv: string[]): ParsedArgs {
-  const args: ParsedArgs = { help: false, verbose: false, requireCitations: false }
+  const args: ParsedArgs = { help: false, verbose: false, requireCitations: false, attach: [] }
   const positionals: string[] = []
 
   for (let i = 0; i < argv.length; i++) {
@@ -118,6 +127,18 @@ export function parseArgs(argv: string[]): ParsedArgs {
 
     if (token in BOOLEAN_FLAGS) {
       args[BOOLEAN_FLAGS[token as keyof typeof BOOLEAN_FLAGS]] = true
+      continue
+    }
+
+    // Repeatable, unlike every other value flag (FLAGS_WITH_VALUE overwrites; --attach
+    // accumulates) — ADR 0005: a run may be given more than one file as evidence.
+    if (token === '--attach') {
+      const value = argv[i + 1]
+      if (value === undefined || value.startsWith('--')) {
+        throw new ScoutlingError('BAD_ARGS', `${token} requires a value.`, `Usage: ${token} <file>`)
+      }
+      args.attach.push(value)
+      i += 1
       continue
     }
 
@@ -170,6 +191,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
       const validFlags = [
         ...Object.keys(FLAGS_WITH_VALUE),
         '--format',
+        '--attach',
         ...Object.keys(NUMERIC_FLAGS),
         ...Object.keys(BOOLEAN_FLAGS),
       ].join(', ')
@@ -328,6 +350,17 @@ export async function runCli(io: CliIO): Promise<number> {
     args.question = trimmed
   }
 
+  // ADR 0005: attachment paths resolve against the injected `cwd` with plain `node:path`, never
+  // through `resolvePath` — they are trusted like `--path` itself, not scope-contained. This runs
+  // before scope-root resolution/config/the provider so a bad --attach fails fast, the same way
+  // an unknown flag does above.
+  let attachments: Attachment[]
+  try {
+    attachments = loadAttachments(args.attach, cwd, args.maxAttachBytes ?? DEFAULT_MAX_ATTACHMENT_BYTES)
+  } catch (error) {
+    return emitError(error instanceof ScoutlingError ? error : new ScoutlingError('INTERNAL', String(error)))
+  }
+
   // resolveScopeRoot resolves a relative path against process.cwd(), not the
   // injected `cwd` — so a relative --path must be made absolute against the
   // effective cwd *here*, before it reaches resolveScopeRoot, or a
@@ -418,6 +451,7 @@ export async function runCli(io: CliIO): Promise<number> {
       systemPrompt,
       excludeGlobs: config.excludeGlobs,
       budget,
+      attachments,
       ...(args.verbose ? { onStep: (step: StepSummary) => writeStderr(`${formatStepLog(step)}\n`) } : {}),
     })
 
@@ -438,12 +472,17 @@ export async function runCli(io: CliIO): Promise<number> {
       )
     }
 
-    const citationsRequiredButMissing = args.requireCitations && result.citations.verifiedCount === 0
+    // ADR 0005: checked against verifiedScopeCount, not verifiedCount — a citation into an
+    // attachment is not evidence about the scope, so it must not satisfy --require-citations.
+    const citationsRequiredButMissing = args.requireCitations && result.citations.verifiedScopeCount === 0
     if (citationsRequiredButMissing) {
       writeStderr(
         `${JSON.stringify({
           warning: 'NO_VERIFIED_CITATIONS',
-          message: 'The answer did not cite any path:line that verifies against the scope.',
+          message:
+            attachments.length > 0
+              ? 'The answer did not cite any path:line that verifies against the scope (citations into attachments do not count).'
+              : 'The answer did not cite any path:line that verifies against the scope.',
           hint: 'Try a narrower question, or drop --require-citations to accept the answer as-is.',
         })}\n`,
       )

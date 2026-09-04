@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 import { createCitationVerifier, extractCitations, verifyCitations } from '../src/citations.js'
+import type { Attachment } from '../src/attachments.js'
 
 // Vitest cannot `vi.spyOn` Node's ESM built-ins directly ("Module namespace is not
 // configurable") — `{ spy: true }` wraps the real implementation instead of replacing it, so
@@ -164,6 +165,120 @@ describe('extractCitations', () => {
       { path: 'src/b.ts', line: 2, endLine: 4 },
       { path: 'c.ts', line: 9 },
     ])
+  })
+})
+
+describe('extractCitations — attachment citations (ADR 0005)', () => {
+  it('extracts @name:line with attachment: true', () => {
+    expect(extractCitations('See the diff (@full.diff:42) for the change.')).toEqual([
+      { path: '@full.diff', line: 42, attachment: true },
+    ])
+  })
+
+  it('extracts @name:line-line as a range, with attachment: true', () => {
+    expect(extractCitations('The hunk is @full.diff:10-25.')).toEqual([
+      { path: '@full.diff', line: 10, endLine: 25, attachment: true },
+    ])
+  })
+
+  it('does not also yield a scope candidate for the same token', () => {
+    // Without stripping the '@name:line' span before the scope scan runs, PATH_TOKEN_RE would
+    // start matching one character in (at "full.diff:42") and produce a phantom scope citation to
+    // a file never claimed to be in scope.
+    const candidates = extractCitations('See @full.diff:42 for the change.')
+    expect(candidates).toEqual([{ path: '@full.diff', line: 42, attachment: true }])
+    expect(candidates).not.toContainEqual(expect.objectContaining({ path: 'full.diff' }))
+  })
+
+  it('extracts an attachment citation and a scope citation from the same answer, in document order', () => {
+    expect(extractCitations('See src/a.ts:1 and then @full.diff:5 for context.')).toEqual([
+      { path: 'src/a.ts', line: 1 },
+      { path: '@full.diff', line: 5, attachment: true },
+    ])
+  })
+
+  it('collapses a duplicate attachment path+line citation', () => {
+    expect(extractCitations('See @plan.md:3, and again @plan.md:3.')).toEqual([
+      { path: '@plan.md', line: 3, attachment: true },
+    ])
+  })
+
+  it('never extracts an attachment citation with no line number', () => {
+    expect(extractCitations('See the @plan.md file.')).toEqual([])
+  })
+})
+
+describe('verifyCitations / createCitationVerifier — attachment citations (ADR 0005)', () => {
+  const attachments: Attachment[] = [
+    { name: 'plan.md', path: '/tmp/plan.md', content: 'one\ntwo\nthree\n', totalLines: 3 },
+  ]
+
+  it('verifies a line within the attachment, with no filesystem access to the scope', () => {
+    const report = verifyCitations(fixtureScope, 'See @plan.md:2 for the plan.', attachments)
+    expect(report.sources).toEqual([{ path: '@plan.md', line: 2, attachment: true, verified: true }])
+  })
+
+  it('verifies a range fully within the attachment', () => {
+    const report = verifyCitations(fixtureScope, 'See @plan.md:1-3 for the plan.', attachments)
+    expect(report.sources).toEqual([
+      { path: '@plan.md', line: 1, endLine: 3, attachment: true, verified: true },
+    ])
+  })
+
+  it('marks a line past the end of the attachment as unverified', () => {
+    const report = verifyCitations(fixtureScope, 'See @plan.md:99 for the plan.', attachments)
+    expect(report.sources).toEqual([{ path: '@plan.md', line: 99, attachment: true, verified: false }])
+  })
+
+  it('marks a citation to a name with no matching attachment as unverified, no throw', () => {
+    expect(() => verifyCitations(fixtureScope, 'See @missing.md:1.', attachments)).not.toThrow()
+    const report = verifyCitations(fixtureScope, 'See @missing.md:1.', attachments)
+    expect(report.sources).toEqual([{ path: '@missing.md', line: 1, attachment: true, verified: false }])
+  })
+
+  it('with no attachments given, every @name:line citation is unverified', () => {
+    const report = verifyCitations(fixtureScope, 'See @plan.md:1.')
+    expect(report.sources).toEqual([{ path: '@plan.md', line: 1, attachment: true, verified: false }])
+  })
+
+  it('verifiedScopeCount excludes verified attachment sources', () => {
+    const report = verifyCitations(fixtureScope, 'See a.txt:1 and @plan.md:1.', attachments)
+    expect(report.verifiedCount).toBe(2)
+    expect(report.verifiedScopeCount).toBe(1)
+  })
+
+  it('createCitationVerifier verifies attachment citations identically to verifyCitations', () => {
+    const verify = createCitationVerifier(fixtureScope, attachments)
+    const answer = 'See @plan.md:2 and a.txt:1.'
+    expect(verify(answer)).toEqual(verifyCitations(fixtureScope, answer, attachments))
+  })
+})
+
+describe('CitationReport summaryLine — attachments (ADR 0005)', () => {
+  const attachments: Attachment[] = [
+    { name: 'plan.md', path: '/tmp/plan.md', content: 'one\ntwo\nthree\n', totalLines: 3 },
+  ]
+
+  it('appends ", N in attachments" after the verified count when N > 0', () => {
+    const report = verifyCitations(fixtureScope, 'See a.txt:1 and @plan.md:1.', attachments)
+    expect(report.summaryLine).toBe('Sources: 2 verified, 1 in attachments')
+  })
+
+  it('keeps the unverifiable clause after the attachments clause', () => {
+    const report = verifyCitations(fixtureScope, 'See @plan.md:1 and does-not-exist.ts:1.', attachments)
+    expect(report.summaryLine).toBe(
+      'Sources: 1 verified, 1 in attachments, 1 unverifiable (does-not-exist.ts:1)',
+    )
+  })
+
+  it('omits the attachments clause when nothing verified is an attachment', () => {
+    const report = verifyCitations(fixtureScope, 'See a.txt:1.', attachments)
+    expect(report.summaryLine).toBe('Sources: 1 verified')
+  })
+
+  it('omits the attachments clause when the only attachment citation is unverified', () => {
+    const report = verifyCitations(fixtureScope, 'See a.txt:1 and @missing.md:1.', attachments)
+    expect(report.summaryLine).toBe('Sources: 1 verified, 1 unverifiable (@missing.md:1)')
   })
 })
 

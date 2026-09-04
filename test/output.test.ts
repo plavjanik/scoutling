@@ -19,6 +19,7 @@ function buildResult(overrides: Partial<RunResult> = {}): RunResult {
     citations: {
       sources: [{ path: 'a.txt', line: 1, verified: true }],
       verifiedCount: 1,
+      verifiedScopeCount: 1,
       unverifiedCount: 0,
       summaryLine: 'Sources: 1 verified',
     },
@@ -55,7 +56,7 @@ describe('formatAnswerText', () => {
   it('still prints the summary line when nothing was cited', () => {
     const result = buildResult({
       answer: 'No relevant files.',
-      citations: { sources: [], verifiedCount: 0, unverifiedCount: 0, summaryLine: 'Sources: none cited' },
+      citations: emptyCitations(),
     })
 
     expect(formatAnswerText(result)).toBe('No relevant files.\nSources: none cited')
@@ -81,7 +82,13 @@ describe('formatAnswerText', () => {
 
 /** The citation report of an answer that cited nothing, since there was no answer to cite from. */
 function emptyCitations(): RunResult['citations'] {
-  return { sources: [], verifiedCount: 0, unverifiedCount: 0, summaryLine: 'Sources: none cited' }
+  return {
+    sources: [],
+    verifiedCount: 0,
+    verifiedScopeCount: 0,
+    unverifiedCount: 0,
+    summaryLine: 'Sources: none cited',
+  }
 }
 
 describe('formatAnswerJson', () => {
@@ -149,6 +156,30 @@ describe('formatAnswerJson', () => {
     const json = formatAnswerJson(result, 'my-model')
 
     expect(json).not.toContain('Sources:')
+  })
+
+  it('serialises an attachment source with attachment: true, and a scope source without the key (ADR 0005)', () => {
+    const result = buildResult({
+      citations: {
+        sources: [
+          { path: 'a.txt', line: 1, verified: true },
+          { path: '@full.diff', line: 5, attachment: true, verified: true },
+        ],
+        verifiedCount: 2,
+        verifiedScopeCount: 1,
+        unverifiedCount: 0,
+        summaryLine: 'Sources: 2 verified, 1 in attachments',
+      },
+    })
+
+    const parsed = JSON.parse(formatAnswerJson(result, 'my-model'))
+
+    expect(parsed.sources).toEqual([
+      { path: 'a.txt', line: 1, verified: true },
+      { path: '@full.diff', line: 5, attachment: true, verified: true },
+    ])
+    expect(Object.prototype.hasOwnProperty.call(parsed.sources[0], 'attachment')).toBe(false)
+    expect(parsed.sources[1].attachment).toBe(true)
   })
 
   it('serialises each section with its own index, heading, answer and sources (DESIGN.md §8, brief mode)', () => {

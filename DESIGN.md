@@ -343,6 +343,11 @@ plausible-sounding ones.
 3. Returns `sources: [{path, line, endLine?, verified: boolean}]` in JSON output, and in text
    mode appends a one-line `Sources: 7 verified, 1 unverifiable (lib/foo.ts:999)`.
 
+`@<name>:line` (or `@<name>:line-line`) is the other citation grammar (ADR 0005): it cites a file
+handed to the run with `--attach`, verified against that attachment's own line count and never
+against the scope — its `Source` carries `attachment: true`, and it never counts toward
+`--require-citations`.
+
 `--require-citations` makes an answer with zero verified sources exit non-zero. This is the
 differentiator nobody else has; it is also exactly what a parent agent needs to decide what to
 `Read` next.
@@ -353,6 +358,7 @@ differentiator nobody else has; it is also exactly what a parent agent needs to 
 scoutling "<question>" [--model <id>] [--base-url <url>] [--api-key <k>]
           [--path <dir>] [--budget quick|normal|deep] [--max-steps N] [--timeout-ms N]
           [--format text|json] [--require-citations] [--verbose] [--no-context]
+          [--attach <file>]... [--max-attach-bytes N]
 scoutling -                   # read the question from stdin (long prompts from a parent agent)
 scoutling models              # GET <base-url>/models — what can I pass to --model?
 scoutling doctor              # resolved config + which layer set each key; base-url reachable?
@@ -382,6 +388,11 @@ scoutling init <claude-code|codex|opencode|cursor>   # v1.1 — writes the integ
   stays a hard failure rather than an answer.
 - Missing `--model` → `BAD_ARGS` whose message includes the live `GET /models` list, so the fix
   is one retry away.
+- **`--attach <file>`** (repeatable) and **`--max-attach-bytes N`** (default 64 000, the sum of
+  every attachment): ADR 0005. Attachment paths resolve against the CLI's own cwd, never through
+  `resolvePath` — they are trusted like `--path` itself, not scope-contained input. Loaded before
+  the run even starts; a missing/binary/duplicate-named/over-cap attachment is `BAD_ARGS` (exit
+  `2`), same as any other bad flag.
 - No interactive prompts, ever (AXI principle 6); `NO_COLOR` respected.
 
 **AXI principles applied:** TOON for tabular tool results (1), 3-field list items (2), truncate

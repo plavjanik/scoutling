@@ -237,3 +237,28 @@ describe('malformed config files', () => {
     )
   })
 })
+
+describe('attach is a caller-only surface (ADR 0005)', () => {
+  // ADR 0005 is explicit: "--attach is a caller-only surface. Config layers may not set it: a
+  // repo's committed scoutling.config.json handing the run a file from outside itself is exactly
+  // the kind of untrusted input DESIGN §6 exists to stop." loadConfig's config-file reader
+  // (pickConfigKeys) only ever copies keys named in CONFIG_KEYS, so an "attach" key in any config
+  // file is silently dropped rather than merged in — this pins that down rather than trusting it
+  // to stay true by accident.
+  it('ignores an "attach" key in scoutling.config.json rather than merging it into the resolved config', () => {
+    writeSharedConfig({ model: 'from-shared-config', attach: ['some/file.diff'] })
+
+    const { config } = loadConfig({ scopeRoot, env: cleanEnv() })
+
+    expect(config.model).toBe('from-shared-config')
+    expect(Object.prototype.hasOwnProperty.call(config, 'attach')).toBe(false)
+  })
+
+  it('ignores an "attach" key in the local override too', () => {
+    writeLocalOverride({ attach: ['some/file.diff'] })
+
+    const { config } = loadConfig({ scopeRoot, env: cleanEnv() })
+
+    expect(Object.prototype.hasOwnProperty.call(config, 'attach')).toBe(false)
+  })
+})

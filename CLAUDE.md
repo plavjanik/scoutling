@@ -16,16 +16,16 @@ Read, in this order, before changing anything:
 **Phases 1-6 of DESIGN.md §13 are done and green; Phase 6 closed 2026-09-04.** The reference eval
 has run and been graded across three models, the results are in `docs/eval.md` and the README, the
 presets were re-tuned three times from measurement, and brief mode shipped. What remains before
-`0.1.0`: the Phase 6b ADRs (`--attach`, a fixed-argv git tool) and eval expansion in `plan.md` §5,
-then Phases 7-8 (integrations, publish). An audit auto-passes only with a verified citation
+`0.1.0`: the git-tool ADR and the eval expansion in `plan.md` §5, then Phases 7-8 (integrations,
+publish). `--attach` (ADR 0005) shipped 2026-09-04. An audit auto-passes only with a verified citation
 (decided 2026-09-04).
 
 Shipping today: `config.ts` (six layers + provenance), `provider.ts` (+ `listModels`),
 `guardrails.ts`, `scope-walk.ts` (+ the shared `isPathVisible`/`explainPathExclusion`), all three
 tools (`tools/read-file.ts`, `tools/list-dir.ts`, `tools/grep.ts`, assembled by `tools/index.ts`),
-`prompt.ts`, `loop.ts` (`runScoutling`), `budget.ts`, `citations.ts`, `sections.ts`, `toon.ts`, `output.ts`,
+`prompt.ts`, `loop.ts` (`runScoutling`), `budget.ts`, `citations.ts`, `sections.ts`, `attachments.ts`, `toon.ts`, `output.ts`,
 `commands.ts`, `run-setup.ts`, `classify-run-error.ts`, `cli.ts` (`runCli`, injectable I/O),
-`script/smoke.ts`, and `eval/run-eval.ts` (`pnpm eval`). **421 hermetic tests, 22 files.**
+`script/smoke.ts`, and `eval/run-eval.ts` (`pnpm eval`). **471 hermetic tests, 23 files.**
 `pnpm smoke` passes live on `qwen/qwen3-coder-next` **on the shipped defaults** — it no longer
 needs `--budget deep` or `--timeout-ms`.
 
@@ -76,6 +76,15 @@ asks for one numbered heading per item of a multi-question brief; `sections.ts` 
 those headings (ATX or bold, numbers kept as written, nothing dropped); `RunResult.sections` carries
 each section's own `sources`, verified through one shared `createCitationVerifier` so a brief that
 cites the same file five times reads it once; `--format json` emits `sections` after `sources`.
+
+**Attachments shipped 2026-09-04** (ADR 0005): `--attach <file>` (repeatable) places a file from
+outside the scope into the user prompt, line-numbered, ahead of the question; `@name:line`
+citations are extracted first and blanked before the scope scan, verified against the attachment
+(never the filesystem), and reported in `sources[]` with `attachment: true`; `verifiedScopeCount`
+is what `--require-citations` checks. Live-verified with a 324-line diff of the brief-mode commit
+as the attachment (dogfood log): 12 of 13 citations verified, and the one that did not was
+`@brief-mode.diff:362` in a 324-line file — the fabricated-list-item failure mode, caught by the
+attachment verifier exactly as the scope verifier catches it for code.
 
 **The five eval-item defects the grading exposed were fixed in wording on 2026-09-04** in
 `local-ai/docs/scoutling-eval.json`; the graded numbers above were produced against the old
@@ -262,6 +271,9 @@ These cost real time to discover; the type checker does not catch the first two.
 - Emoji (🐦) on human-facing surfaces only: README, DESIGN, npm description, `--help`. Never on
   stdout answers, the one-line JSON errors or warnings, the `--format json` object, or the
   `--verbose` step log — parent agents parse those.
+- **`test/no-write.test.ts` bans the write-API identifiers as bare words anywhere under `src/`**,
+  strings and comments included — a hint that said "rename one" failed the gate. Word a message
+  around it rather than weakening the gate.
 - Toolchain reality: **vitest 4** (not ^2), **tsdown needs Node ^22.18 || >=24.11 to build**, and
   `@vscode/ripgrep` 1.18 ships per-platform optional deps rather than a postinstall download.
 
