@@ -8,10 +8,12 @@ This file is a status document, not a second source of truth — if it disagrees
 
 ## 1. Status in one line
 
-**Phases 1–5 are done, green and pushed. Phase 6 is nearly done:** the presets have been re-tuned
-twice from measurement, the reference eval has run across three models, and all 4 audit questions
-plus all 30 survey answers have been graded. What remains is writing the results into
-`docs/eval.md` and the README, and fixing the eval-item defects the grading exposed.
+**Phases 1–6 are done and green (Phase 6 closed 2026-09-04).** The presets have been re-tuned three
+times from measurement, the reference eval has run across three models, all 4 audit questions plus
+all 30 survey answers have been graded, the results are written into `docs/eval.md` and the README,
+the five eval-item defects are fixed in wording, and brief mode (Phase 6b item 1) has shipped. What
+remains before `0.1.0` is one open eval decision (§5 item 2), the Phase 6b ADRs and eval expansion,
+and Phases 7–8.
 
 397 hermetic tests, 21 files. CI green on ubuntu/macos/windows × node 22/24. `pnpm smoke` passes
 live on the shipped defaults.
@@ -160,17 +162,15 @@ run still passes on a citation that does not verify. Closing it means grading on
 
 ## 5. Next steps, in order
 
-1. **Fix the five eval items** above. They are wording changes, not new questions.
+1. ~~**Fix the five eval items** above.~~ Done 2026-09-04 in `local-ai/docs/scoutling-eval.json` (wording only; `mcp-server-boundary` also widened its scope to `apps/signals` and now asks for the excluded tools and the no-token path, since the narrow root had made it a 6-of-6 pass). Every fact in the new notes was re-checked against the source that day.
 2. **Decide auto-grade on `verifiedSources`** — one-line harness change; it alters eval semantics,
    so it is a decision, not a cleanup.
-3. **Third preset nudge:** `normal` hit 14/14 steps twice and 122 KB against a 112 KB cap, so
-   ~16 steps / 128 KB. `deep` used 23/28 steps and 51 % of its bytes — leave it generous.
-4. **Write the results** into `docs/eval.md` and the README (DESIGN §13 item 6). This closes Phase 6.
+3. ~~**Third preset nudge.**~~ Done 2026-09-04: `normal` is 16 steps / 128 KB / 730 s (DESIGN §7 carries the derivation); `deep` left as is.
+4. ~~**Write the results** into `docs/eval.md` and the README.~~ Done 2026-09-04 (`docs/eval.md` "Results" section; README "Which model" and "Briefs"). Phase 6 is closed.
 5. **Phase 6b — decided 2026-09-03 from the subagent census** (`docs/subagent-census.md`; the
    decisions are Petr's, made on the census numbers):
-   - **Accept a multi-question brief in one run.** 70 % of real briefs carry 3–8 numbered
-     questions. The system prompt asks for one heading per numbered item; `--format json` gains
-     per-section citations. The skill's "one question per run" line goes.
+   - ~~**Accept a multi-question brief in one run.**~~ Shipped 2026-09-04 (`src/sections.ts`,
+     `RunResult.sections`, `--format json` `sections`; live-verified on the Zowe brief, dogfood log).
    - **Two new read-only inputs, each as an ADR beside 0002:** a fixed-argv `git show/log/diff`
      tool (no argv from the model), and a read-only `--attach <file>` for a saved diff or plan.
      Together they cover the 20 diff-review agents and the 15 % of runs that read evidence

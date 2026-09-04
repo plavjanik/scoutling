@@ -239,10 +239,17 @@ explicit-`path` follow-up above.
 | preset | maxSteps | maxToolOutputBytes | timeoutMs | maxOutputTokens |
 |---|---|---|---|---|
 | `quick` | 8 | 48 000 | 420 000 | 8 000 |
-| `normal` (default) | 14 | 112 000 | 660 000 | 12 000 |
+| `normal` (default) | 16 | 128 000 | 730 000 | 12 000 |
 | `deep` | 28 | 256 000 | 1 260 000 | 16 000 |
 
 Any individual cap is overridable (`--max-steps`, `--max-tool-bytes`, `--timeout-ms`).
+
+**Nudged a third time on 2026-09-04, from the graded eval.** `normal` hit its 14-step cap on two
+of the graded runs and measured 122 KB of tool output against its 112 KB cap on a third, so it
+moves to 16 steps / 128 KB (timeout 730 s by the same `maxSteps × 40 s + 90 s` rule). `deep` used
+23 of its 28 steps and 51 % of its bytes across the same runs and is left generous. The first live
+brief-mode run (`docs/dogfood-log.md`, 2026-09-04) used 213 KB under `deep`, which is the shape
+the census says wants more room, not `normal`.
 
 **Re-tuned a second time on 2026-08-29, from the eval itself.** The first re-sizing (below) came
 from a distribution of *file* costs; these numbers come from running real questions. A sweep of
@@ -255,7 +262,7 @@ question it was ~15 % short of. `normal`'s 112 KB also covers the five survey qu
 uncapped at 107-114 KB. `quick` moves to 8 steps because `backtest-runner-header` needs 7.
 
 `TOOL_CALL_RESERVATION_BYTES` stays at 16 000 through this re-tune too: under the new caps it
-admits 3 / 7 / 16 concurrent calls, with worst-case overshoot at exactly 2.0x for all three.
+admits 3 / 8 / 16 concurrent calls, with worst-case overshoot at exactly 2.0x for all three.
 
 **Provisional, and the tail is wide.** `form4-ticker-count` used 10.3 KB on one run and 210 KB on
 another — same question, same model, a different path through it. That is why `deep` is 256 KB

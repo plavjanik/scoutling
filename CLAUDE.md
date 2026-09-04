@@ -13,9 +13,11 @@ Read, in this order, before changing anything:
 
 ## Status — read this first
 
-**Phases 1-5 of DESIGN.md §13 are done and green. Phase 6 is in progress:** the preset re-sizing
-is done and the first reference-eval model has been run. What remains is the other three models,
-grading, and a second preset re-tune — which the first model's numbers already say is needed.
+**Phases 1-6 of DESIGN.md §13 are done and green; Phase 6 closed 2026-09-04.** The reference eval
+has run and been graded across three models, the results are in `docs/eval.md` and the README, the
+presets were re-tuned three times from measurement, and brief mode shipped. What remains before
+`0.1.0`: one open eval decision (auto-grade on `verifiedSources`), the Phase 6b ADRs and eval
+expansion in `plan.md` §5, then Phases 7-8 (integrations, publish).
 
 Shipping today: `config.ts` (six layers + provenance), `provider.ts` (+ `listModels`),
 `guardrails.ts`, `scope-walk.ts` (+ the shared `isPathVisible`/`explainPathExclusion`), all three
@@ -28,7 +30,7 @@ needs `--budget deep` or `--timeout-ms`.
 
 ### Phase 6 — the reference eval is run and graded
 
-**Presets re-tuned twice** (§7 carries the table and both derivations). Exhaustion fell from 15 of
+**Presets re-tuned three times** (§7 carries the table and every derivation; `normal` is now 16 steps / 128 KB). Exhaustion fell from 15 of
 26 cells (57 %) at DESIGN's original guesses to 3 of 54 (5 %).
 
 **Three models ranked**, each 9 questions x 2 runs. Audits are machine-graded; all 30 survey
@@ -74,9 +76,10 @@ those headings (ATX or bold, numbers kept as written, nothing dropped); `RunResu
 each section's own `sources`, verified through one shared `createCitationVerifier` so a brief that
 cites the same file five times reads it once; `--format json` emits `sections` after `sources`.
 
-**What remains in Phase 6:** write the results into `docs/eval.md` and the README, fix five defects
-the grading exposed in the eval *items* themselves, and a small `normal` nudge (~16 steps /
-128 KB). `plan.md` is the working status document.
+**The five eval-item defects the grading exposed were fixed in wording on 2026-09-04** in
+`local-ai/docs/scoutling-eval.json`; the graded numbers above were produced against the old
+wording, so a re-run is Phase 6b work, not a correction of these results. `plan.md` is the working
+status document.
 
 The whole CLI contract of DESIGN.md §9 exists: `--budget quick|normal|deep` with `--max-steps` /
 `--max-tool-bytes` / `--timeout-ms` overriding individual caps, `--format text|json`,

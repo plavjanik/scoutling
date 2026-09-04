@@ -222,6 +222,88 @@ For a manually graded question (no `expect`), there is no `auto` signal at all �
 entirely from reading the answer, using the question's `note` (if any) as the guide to what a
 correct answer needs to say.
 
+## Results — the reference run, graded (2026-08-28 to 08-30)
+
+Nine questions (`local-ai/docs/scoutling-eval.json`: four doc-vs-code audits with `expect`, five
+surveys graded by hand), two runs each (temperatures 0 and 0.5), three models, one GPU. Every one
+of the 30 survey answers was checked claim by claim against `local-ai`'s source. `plan.md` §3 has
+the working notes; this is the record.
+
+### Models
+
+Three, not the four DESIGN §12 named. `qwen/qwen3.8-27b` was dropped after the run: it
+reproducibly took LM Studio down at the same cell (`scoring-model`, run 0) on separate attempts,
+and it is the only 4-bit model of the four, so ranking it would have measured quantization as
+much as architecture (details in the incompatibility section below). All three remaining models
+are MLX 8-bit, loaded at a 262 144-token context.
+
+### Audits (machine-graded, 4 questions × 2 runs)
+
+| model | auto | verified citations | exhausted | wall | s/step |
+|---|---|---|---|---|---|
+| `qwen/qwen3-coder-next` | 6/8 | 253 | 1 | 37 min | 11 s |
+| `qwen/qwen3.6-35b-a3b` | 6/8 | 364 | **0** | 32 min | 14 s |
+| `qwen/qwen3-next-80b` | 3/8 | 167 | 2 | **18 min** | **6 s** |
+
+Requiring a `path:line` token to auto-pass flipped two results from pass to fail; both were
+answers carrying the right numbers while citing nothing checkable. The residual gap is that the
+token proves the answer *contains* a citation, not that it *resolves*; closing it means grading
+on `verifiedSources` in the harness, which changes eval semantics and is recorded as an open
+decision in `plan.md`.
+
+### Surveys (hand-graded, 5 questions × 2 runs)
+
+| model | solid | mostly right | significant errors | false claims |
+|---|---|---|---|---|
+| `qwen/qwen3.6-35b-a3b` | **7** | 3 | 0 | 12 |
+| `qwen/qwen3-coder-next` | 5 | 5 | 0 | 9 |
+| `qwen/qwen3-next-80b` | 2 (thin) | 7 | 1 | 8 |
+
+The false-claim counts invert the ranking, and that is the useful finding: the two contenders
+fail differently.
+
+- **`coder-next` states wrong *relationships*, compactly and confidently** — "Dorsey Momentum:
+  pure price-based" when `dorsey-moat.ts:5` says it is PRICE-BLIND and fundamentals-only; a
+  "frontier model" writing the memo when `config.ts:129` shows extract and memo share
+  `chat-strict`. A real symbol in a false relation, and expensive to catch: you must open the file.
+- **`35b-a3b` fabricates *list items* at the margin of long enumerations** — two nonexistent
+  ingestion sources, a nonexistent `score-score.ts`, a line 333 in a 234-line file. Its long
+  tables are about 95 % exact and 5 % confabulated. Cheap to catch: the path or line does not
+  exist, and `sources[].verified` says so.
+
+On the three questions that require *finding* things across directories, `35b-a3b` wins on
+accuracy, not only volume: it was the only model to name all three `/learn` consumers and the
+only one to get the verifier's model right. On the two single-file questions the two are
+equivalent and `coder-next` is cheaper. `qwen3-next-80b` is behind on every axis except speed:
+thinnest coverage, missed the `/learn` trap in both runs, the only "significant errors" answer,
+and one run with zero parseable citations. DESIGN §12 called it "the leading hypothesis"; that is
+disproved.
+
+### What the numbers do not settle
+
+- **Run-to-run variance is ±1 on the 8 audit cells**, so `coder-next` and `35b-a3b` are
+  indistinguishable there; the surveys and the citation counts separate them.
+- **Timing is noisy for reasons other than contention.** Re-measuring on a quiet GPU produced
+  *slower* per-step numbers than the supposedly contended run (17.1 vs 11.4 s/step for
+  `coder-next`), most likely JIT cold-load amortised over fewer cells. No single s/step figure
+  is precise.
+- **The item set has known defects**, fixed in wording on 2026-09-04 (see the question file's
+  description): `pipeline-stages` graded a split the question did not ask for and has no
+  canonical stage count; `scoring-model` turned on an interpretation of "full formula";
+  `strategy-tournament` was answerable without its registry and had the universe premise
+  backwards; `mcp-server-boundary` discriminated nothing (6 of 6 passed); `learn-glossary-system`
+  rewarded contradicting the repo's own `CONVENTIONS.md`. Results above were graded against the
+  old wording; a re-run against the new wording is Phase 6b, together with a second scope
+  (`docs/subagent-census.md`).
+
+### Recommendation
+
+**`qwen/qwen3.6-35b-a3b`** as the default recommendation, with **`qwen/qwen3-coder-next`** as the
+cheaper option for narrow, single-file questions. Say which failure to watch for, not only which
+scored higher: verify enumerated lists from the first and claimed relationships from the second.
+`--require-citations` and the per-source `verified` flag catch the first kind mechanically; the
+second needs the caller to open the cited line, which is the discipline the skill asks for anyway.
+
 ## Timeout policy: timing out is a result
 
 Every model runs against the **same** wall-clock cap (DESIGN.md §7's `timeoutMs`), sized from the

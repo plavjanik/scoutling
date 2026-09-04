@@ -94,10 +94,18 @@ export interface Budget {
  * different path through it — which is why `deep` is 256 KB rather than
  * something tighter, and why this table should be re-derived once the eval has
  * run across four models rather than one.
+ *
+ * **Third re-tune, 2026-09-04, from the graded three-model eval.** `normal`
+ * hit its 14-step cap on two of the graded runs and measured 122 KB of tool
+ * output against its 112 KB cap on a third, so it moves to 16 steps / 128 KB
+ * (timeout by the same `maxSteps × 40 s + 90 s` rule). `deep` used 23 of 28
+ * steps and 51 % of its bytes across the same runs and is left as is. The
+ * wider `normal` cap also raises `TOOL_CALL_RESERVATION_BYTES`'s admitted
+ * parallelism from 3 / 7 / 16 to 3 / 8 / 16.
  */
 export const BUDGET_PRESETS: Record<BudgetPreset, Budget> = {
   quick: { maxSteps: 8, maxToolOutputBytes: 48_000, timeoutMs: 420_000, maxOutputTokens: 8_000 },
-  normal: { maxSteps: 14, maxToolOutputBytes: 112_000, timeoutMs: 660_000, maxOutputTokens: 12_000 },
+  normal: { maxSteps: 16, maxToolOutputBytes: 128_000, timeoutMs: 730_000, maxOutputTokens: 12_000 },
   deep: { maxSteps: 28, maxToolOutputBytes: 256_000, timeoutMs: 1_260_000, maxOutputTokens: 16_000 },
 }
 
