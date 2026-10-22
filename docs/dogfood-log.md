@@ -89,6 +89,17 @@ What it settled:
   therefore not directly comparable to the 22 KB and 33 KB above it — part of the drop is TOON,
   part is the measurement changing under it. Phase 6 should tune the preset caps from Phase 4
   numbers only, and re-measure on a scope larger than this repo.
+- **Two extractor defects were scoring correct citations as unverified — fixed 2026-10-22.**
+  Found by the 7-model eval against the Signals app in `local-ai` (`docs/eval.md`, "Harness
+  defect found"), not by a scoutling run, so no row above. (1) `[` `]` `(` `)` were excluded from
+  the path token, so every model's correct `app/learn/[slug]/page.tsx:173` was recorded as
+  `page.tsx:173` and failed verification; Next.js `[param]`, `[...slug]`, `[[...slug]]` and
+  `(group)` segments are now kept. (2) A bare `candidates.ts:19` was looked up only at the scope
+  root; it now resolves when exactly one visible file has that basename (`path` is the resolved
+  one, `citedAs` the name as written) and otherwise stays unverified with a `note` saying
+  "ambiguous" or "no file". One baseline model failed two audit cells on (2) alone. Fixed with
+  hermetic tests only — the eval numbers in `docs/eval.md` predate the fix, so re-grading those
+  cells is the live check still owed.
 - **Citation extraction picked up example paths from prose — fixed 2026-08-28.** In the first
   Phase 4 run the model listed the paths a *rejected* traversal would use (`../../etc/passwd`)
   as illustrations, and the extractor reported them as unverifiable sources. Later runs added

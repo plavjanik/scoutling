@@ -339,8 +339,17 @@ plausible-sounding ones.
    a `path:line` for every factual claim, a bare path is not a citation by this tool's own
    contract — requiring the line number cost no true positive in any observed run and removed
    every false one.
-2. Verifies the file exists in scope and the line range is within `totalLines`.
-3. Returns `sources: [{path, line, endLine?, verified: boolean}]` in JSON output, and in text
+   A path may contain Next.js route segments — `[slug]`, `[...slug]`, `[[...slug]]` anywhere in a
+   segment, `(group)` as a whole directory — matched only in those balanced shapes, so wrapper
+   punctuation around a citation still falls away (fixed 2026-10-22: `app/learn/[slug]/page.tsx`
+   used to be recorded as `page.tsx`).
+2. Verifies the file exists in scope and the line range is within `totalLines`. A **bare
+   filename** (`candidates.ts:19`) that is not at the scope root is resolved against the scope:
+   if exactly one *visible* file (the tools' own rule — `.git/`, `excludeGlobs`, `.gitignore`)
+   has that basename, it is verified against that file and the source carries the resolved
+   `path` plus `citedAs`; if several or none do, it stays unverified with a `note` saying which.
+   Never a guess (added 2026-10-22).
+3. Returns `sources: [{path, line, endLine?, verified: boolean, citedAs?, note?}]` in JSON output, and in text
    mode appends a one-line `Sources: 7 verified, 1 unverifiable (lib/foo.ts:999)`.
 
 `@<name>:line` (or `@<name>:line-line`) is the other citation grammar (ADR 0005): it cites a file

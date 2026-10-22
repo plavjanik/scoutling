@@ -3,6 +3,7 @@ import { existsSync, readFileSync, statSync, type Stats } from 'node:fs'
 import type { Attachment } from './attachments.js'
 import { isProbablyBinary, resolvePath } from './guardrails.js'
 import { ScoutlingError } from './errors.js'
+import { walkScope } from './scope-walk.js'
 
 /**
  * DESIGN.md §8: a `path:line` (or `path:line-line`) reference, before it is checked. `line` is
@@ -36,6 +37,20 @@ export interface Source {
   verified: boolean
   /** Present only when this source cites an attachment (ADR 0005) rather than a file in the scope. */
   attachment?: true
+  /**
+   * Present only when the answer cited a bare filename (`candidates.ts:19`) that was resolved to
+   * the one visible file of that name in the scope: the name as written, while `path` carries the
+   * resolved scope-relative path.
+   */
+  citedAs?: string
+  /** Why a citation could not be checked, when that is not obvious from the path and line alone (e.g. an ambiguous bare filename). */
+  note?: string
+}
+
+/** What a verifier needs to know about the scope beyond its root — the same config-supplied visibility the tools are bound to. */
+export interface CitationVerifierOptions {
+  /** Config's `excludeGlobs`, never the model's: a bare filename is only resolved to a file every tool could also see. */
+  excludeGlobs?: string[]
 }
 
 export interface CitationReport {
@@ -73,8 +88,15 @@ export interface CitationReport {
 // a legal path character (it's how an extension is spelled) and the regex cannot otherwise tell
 // "src/cli.ts" apart from "src/cli.ts." at a sentence's end.
 
-const MARKDOWN_LINK_RE = /\[([^\]]*)\]\([^)]*\)/g
-const URL_RE = /https?:\/\/[^\s)\]}"'<>,]+/g
+// The label may itself hold up to two levels of balanced brackets, so a link whose label is a
+// Next.js route path (`[app/learn/[slug]/page.tsx:173](url)`, or `[[...slug]]`) is still unwrapped
+// whole — a flat `[^\]]*` label would fail to match at all and leave the brackets and the URL in
+// the text.
+const MARKDOWN_LINK_RE = /\[((?:[^[\]]|\[(?:[^[\]]|\[[^[\]]*\])*\])*)\]\([^)]*\)/g
+// `]` is deliberately *not* a terminator: a URL with a route segment in it
+// (`…/app/[slug]/page.tsx:3`) would otherwise stop at the `]` and leave `/page.tsx:3` behind as a
+// phantom bare-filename citation.
+const URL_RE = /https?:\/\/[^\s)}"'<>,]+/g
 
 // ADR 0005's attachment grammar, `@<name>:line` or `@<name>:line-line` — resolved against
 // `Attachment[]`, never the filesystem. Extracted and blanked out of the text *before*
@@ -93,7 +115,22 @@ const ATTACHMENT_TOKEN_RE = /@([A-Za-z0-9_.\-]+):(\d+)(?:-(\d+))?/g
 // is still picked up (and later normalized to `/`). The optional trailing group captures `:line`
 // or `:line-line` only when it immediately follows the path with no space, which is how every
 // citation in the system prompt's contract is shaped.
-const PATH_TOKEN_RE = /[A-Za-z0-9_.][A-Za-z0-9_.\-/\\]*(?::(\d+)(?:-(\d+))?)?/g
+//
+// Brackets and parens stay out of the plain character class — that is what lets `[src/cli.ts:10]`
+// and `(a.txt:1)` drop their wrappers for free — and come back in only as the two *balanced*
+// shapes a Next.js route path is spelled with (2026-10-22 eval: `app/learn/[slug]/page.tsx` was
+// recorded as `page.tsx` by every model that cited it):
+//   - ROUTE_PARAM: `[slug]`, `[...slug]`, `[[...slug]]`, anywhere in a segment (`[id].tsx` is a
+//     pages-router filename). Its inside admits no `/`, `:`, `,` or space, so a wrapper around a
+//     whole citation or a quoted spread like `[...flags, path/operand]` never matches it.
+//   - ROUTE_GROUP: `(marketing)`, only as a whole directory segment — it must be followed by a
+//     separator, so prose `foo(x)` and a parenthesized citation never become part of a path.
+const ROUTE_PARAM = String.raw`\[\[[\w.\-]+\]\]|\[[\w.\-]+\]`
+const ROUTE_GROUP = String.raw`\([\w.\-]+\)(?=[/\\])`
+const PATH_TOKEN_RE = new RegExp(
+  String.raw`(?:[A-Za-z0-9_.]|${ROUTE_PARAM}|${ROUTE_GROUP})(?:[A-Za-z0-9_.\-/\\]|${ROUTE_PARAM}|${ROUTE_GROUP})*(?::(\d+)(?:-(\d+))?)?`,
+  'g',
+)
 
 /**
  * A token is a citation only when it carries a line number and its path part looks like a path.
@@ -208,6 +245,27 @@ const MAX_VERIFIABLE_FILE_BYTES = 2 * 1024 * 1024
 /** Cached per resolved path within one `verifyCitations` call: line count, or `null` if the file is too large/binary to count. */
 type LineCountCache = Map<string, number | null>
 
+/**
+ * Every visible file in the scope, grouped by basename (scope-relative POSIX paths) — or
+ * `'too-large'` when the walk hit `MAX_INDEXED_ENTRIES` and so cannot prove a name is unique.
+ */
+type BasenameIndex = Map<string, string[]> | 'too-large'
+
+/** Everything one verifier caches across calls: line counts per file, and the basename index (built on the first bare-filename citation, never before). */
+interface VerifierState {
+  scopeRoot: string
+  excludeGlobs: string[]
+  lineCounts: LineCountCache
+  basenames?: BasenameIndex
+}
+
+/**
+ * Ceiling on the scope walk behind bare-filename resolution. A walk that stops early cannot tell
+ * "one file of this name" from "one file of this name *so far*", so past it a bare filename is
+ * left unverified (with a note) rather than resolved on partial evidence.
+ */
+const MAX_INDEXED_ENTRIES = 200_000
+
 /** Line count matching `read_file`'s own accounting: a trailing newline doesn't count as an extra empty line. */
 function countLines(text: string): number {
   const lines = text.split('\n')
@@ -261,9 +319,87 @@ function verifyAttachmentCitation(candidate: CitationCandidate, attachments: Att
   }
 }
 
-function verifyOne(scopeRoot: string, candidate: CitationCandidate, cache: LineCountCache, attachments: Attachment[]): Source {
+/**
+ * Built lazily from the same `walkScope` behind `list_dir` and the grep fallback, so "visible"
+ * here means exactly what it means to the tools: `.git/` never, `excludeGlobs` and every
+ * `.gitignore` from the root down applied. A file the model could not have read is never what a
+ * bare filename resolves to.
+ */
+function getBasenameIndex(state: VerifierState): BasenameIndex {
+  if (state.basenames !== undefined) return state.basenames
+
+  const { entries, truncated } = walkScope({
+    scopeRoot: state.scopeRoot,
+    dir: state.scopeRoot,
+    depth: Number.POSITIVE_INFINITY,
+    excludeGlobs: state.excludeGlobs,
+    limit: MAX_INDEXED_ENTRIES,
+  })
+  if (truncated) {
+    state.basenames = 'too-large'
+    return state.basenames
+  }
+
+  const index = new Map<string, string[]>()
+  for (const entry of entries) {
+    if (entry.type !== 'file') continue
+    const name = entry.path.slice(entry.path.lastIndexOf('/') + 1)
+    const paths = index.get(name)
+    if (paths) paths.push(entry.path)
+    else index.set(name, [entry.path])
+  }
+  state.basenames = index
+  return index
+}
+
+/** Ambiguous matches listed in a note are capped, for the same reason as the summary line's unverifiable list. */
+const MAX_LISTED_MATCHES = 3
+
+/**
+ * A citation with no directory (`candidates.ts:19`) that names no file at the scope root. Models
+ * write these routinely — one baseline model in the 2026-10-22 eval failed two audit cells on
+ * nothing else. Resolved only when exactly one visible file has that basename: with two, picking
+ * one would be a guess, and a guessed citation that happens to verify is worse than an honest
+ * unverified one, so ambiguity and absence are both reported in `note` instead.
+ */
+function verifyBareName(state: VerifierState, candidate: CitationCandidate, attachments: Attachment[]): Source {
+  const { path, line, endLine } = candidate
+  const unverified = (note: string): Source => ({
+    path,
+    line,
+    ...(endLine === undefined ? {} : { endLine }),
+    verified: false,
+    note,
+  })
+
+  const index = getBasenameIndex(state)
+  if (index === 'too-large') {
+    return unverified(`the scope has more than ${MAX_INDEXED_ENTRIES} entries, too many to resolve a bare filename`)
+  }
+
+  const matches = index.get(path) ?? []
+  if (matches.length === 0) return unverified(`no file in scope is named ${path}`)
+  if (matches.length > 1) {
+    const listed = matches.slice(0, MAX_LISTED_MATCHES)
+    if (matches.length > listed.length) listed.push(`+${matches.length - listed.length} more`)
+    return unverified(`ambiguous: ${matches.length} files in scope are named ${path} (${listed.join(', ')})`)
+  }
+
+  // No second lookup on the resolved path: a dangling symlink at the root is listed by the walk yet
+  // fails `existsSync`, and would otherwise bounce between here and `verifyOne` forever.
+  const resolved = verifyOne(state, { ...candidate, path: matches[0] as string }, attachments, false)
+  return { ...resolved, citedAs: path }
+}
+
+function verifyOne(
+  state: VerifierState,
+  candidate: CitationCandidate,
+  attachments: Attachment[],
+  resolveBareName = true,
+): Source {
   if (candidate.attachment) return verifyAttachmentCitation(candidate, attachments)
 
+  const { scopeRoot, lineCounts: cache } = state
   const { path, line, endLine } = candidate
 
   let resolved: string
@@ -279,7 +415,11 @@ function verifyOne(scopeRoot: string, candidate: CitationCandidate, cache: LineC
     throw error
   }
 
-  if (!existsSync(resolved)) return { path, line, endLine, verified: false }
+  if (!existsSync(resolved)) {
+    // A bare filename that is not at the scope root may still name exactly one file deeper down.
+    if (resolveBareName && !path.includes('/')) return verifyBareName(state, candidate, attachments)
+    return { path, line, endLine, verified: false }
+  }
 
   const stats = statSync(resolved)
   if (!stats.isFile()) return { path, line, endLine, verified: false } // a directory is not verified
@@ -323,14 +463,19 @@ function buildSummaryLine(verifiedCount: number, attachmentVerifiedCount: number
 }
 
 /** Shared body of `verifyCitations` and `createCitationVerifier` — the only difference between them is whether `cache` is fresh per call or shared across many. */
-function verifyCitationsWithCache(
-  scopeRoot: string,
-  answer: string,
-  cache: LineCountCache,
-  attachments: Attachment[],
-): CitationReport {
+function verifyCitationsWithCache(state: VerifierState, answer: string, attachments: Attachment[]): CitationReport {
   const candidates = extractCitations(answer)
-  const sources = candidates.map((candidate) => verifyOne(scopeRoot, candidate, cache, attachments))
+  const sources: Source[] = []
+  // Extraction already collapsed identical tokens; a resolved bare filename can still land on a
+  // path+line cited elsewhere in full (`lib/a.ts:19 … a.ts:19`), and that is one claim, not two.
+  const seen = new Set<string>()
+  for (const candidate of candidates) {
+    const source = verifyOne(state, candidate, attachments)
+    const key = `${source.attachment ? '@' : ''}${source.path} ${source.line} ${source.endLine ?? ''}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    sources.push(source)
+  }
 
   const verifiedCount = sources.filter((source) => source.verified).length
   const verifiedScopeCount = sources.filter((source) => source.verified && !source.attachment).length
@@ -353,25 +498,36 @@ function verifyCitationsWithCache(
  * `--require-citations` (a later slice) decides what to do with a report that has zero verified
  * *scope* sources (`verifiedScopeCount`).
  */
-export function verifyCitations(scopeRoot: string, answer: string, attachments: Attachment[] = []): CitationReport {
-  return verifyCitationsWithCache(scopeRoot, answer, new Map(), attachments)
+export function verifyCitations(
+  scopeRoot: string,
+  answer: string,
+  attachments: Attachment[] = [],
+  options: CitationVerifierOptions = {},
+): CitationReport {
+  return verifyCitationsWithCache(createVerifierState(scopeRoot, options), answer, attachments)
+}
+
+function createVerifierState(scopeRoot: string, options: CitationVerifierOptions): VerifierState {
+  return { scopeRoot, excludeGlobs: options.excludeGlobs ?? [], lineCounts: new Map() }
 }
 
 /**
  * A verifier bound to one scope root (and, when given, one set of attachments) that shares its
- * line-count cache across calls.
+ * line-count cache — and its bare-filename index — across calls.
  *
  * DESIGN.md §8's brief mode (`sections.ts`) verifies an answer once as a whole for the top-level
  * `citations` report, and then verifies each of its sections again for that section's own
  * `sources` — a five-item brief that all cites the same large file would otherwise read that file
  * once per verification (six times: once whole-answer, once per section) instead of once. The
  * factory exists so a caller doing that repeated verification against one scope root pays for the
- * read exactly once, no matter how many times the returned function is called.
+ * read exactly once, no matter how many times the returned function is called. The same holds
+ * for the scope walk behind bare-filename resolution: at most one per verifier.
  */
 export function createCitationVerifier(
   scopeRoot: string,
   attachments: Attachment[] = [],
+  options: CitationVerifierOptions = {},
 ): (answer: string) => CitationReport {
-  const cache: LineCountCache = new Map()
-  return (answer: string) => verifyCitationsWithCache(scopeRoot, answer, cache, attachments)
+  const state = createVerifierState(scopeRoot, options)
+  return (answer: string) => verifyCitationsWithCache(state, answer, attachments)
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it, afterEach, vi } from 'vitest'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -320,7 +320,14 @@ describe('verifyCitations', () => {
 
   it('marks a citation to a nonexistent file as unverified, no throw', () => {
     const report = verifyCitations(fixtureScope, 'See does-not-exist.ts:1 for details.')
-    expect(report.sources).toEqual([{ path: 'does-not-exist.ts', line: 1, verified: false }])
+    expect(report.sources).toEqual([
+      { path: 'does-not-exist.ts', line: 1, verified: false, note: 'no file in scope is named does-not-exist.ts' },
+    ])
+  })
+
+  it('marks a nonexistent file under a directory as unverified, with no bare-name lookup', () => {
+    const report = verifyCitations(fixtureScope, 'See sub/does-not-exist.ts:1 for details.')
+    expect(report.sources).toEqual([{ path: 'sub/does-not-exist.ts', line: 1, verified: false }])
   })
 
   it('marks a citation to a directory as unverified', () => {
@@ -432,5 +439,212 @@ describe('CitationReport summaryLine', () => {
     expect(report.summaryLine).toBe(
       'Sources: 0 verified, 5 unverifiable (f1.ts:1, f2.ts:1, f3.ts:1, +2 more)',
     )
+  })
+})
+
+// Regression (2026-10-22 eval, docs/eval.md "Harness defect found"): every model cited
+// `app/learn/[slug]/page.tsx` correctly and the extractor recorded `page.tsx`, because `[` `]` `(`
+// `)` were excluded from the path token to keep wrapper punctuation out of a match.
+describe('extractCitations — Next.js route segments in paths', () => {
+  it('keeps a [param] segment in the path', () => {
+    expect(extractCitations('The page is app/learn/[slug]/page.tsx:173 here.')).toEqual([
+      { path: 'app/learn/[slug]/page.tsx', line: 173 },
+    ])
+  })
+
+  it('keeps a [param] segment with a line range', () => {
+    expect(extractCitations('See app/learn/[slug]/page.tsx:172-173.')).toEqual([
+      { path: 'app/learn/[slug]/page.tsx', line: 172, endLine: 173 },
+    ])
+  })
+
+  it('keeps it inside backticks, bold, and a table cell', () => {
+    expect(extractCitations('In `app/learn/[slug]/page.tsx:173` the slug is read.')).toEqual([
+      { path: 'app/learn/[slug]/page.tsx', line: 173 },
+    ])
+    expect(extractCitations('**app/learn/[slug]/page.tsx:173** renders it.')).toEqual([
+      { path: 'app/learn/[slug]/page.tsx', line: 173 },
+    ])
+    expect(extractCitations('| slug | `app/learn/[slug]/page.tsx:172-173` |\n|---|---|')).toEqual([
+      { path: 'app/learn/[slug]/page.tsx', line: 172, endLine: 173 },
+    ])
+  })
+
+  it('keeps catch-all, optional catch-all and (group) segments', () => {
+    expect(
+      extractCitations(
+        'See app/docs/[...slug]/page.tsx:3, app/shop/[[...slug]]/page.tsx:4 and app/(marketing)/about/page.tsx:5.',
+      ),
+    ).toEqual([
+      { path: 'app/docs/[...slug]/page.tsx', line: 3 },
+      { path: 'app/shop/[[...slug]]/page.tsx', line: 4 },
+      { path: 'app/(marketing)/about/page.tsx', line: 5 },
+    ])
+  })
+
+  it('keeps a bracketed filename (pages router) and a path that starts with a group', () => {
+    expect(extractCitations('See pages/posts/[id].tsx:9 and (auth)/login/page.tsx:2.')).toEqual([
+      { path: 'pages/posts/[id].tsx', line: 9 },
+      { path: '(auth)/login/page.tsx', line: 2 },
+    ])
+  })
+
+  it('unwraps a markdown link whose label is a bracketed path', () => {
+    expect(
+      extractCitations('See [app/learn/[slug]/page.tsx:173](https://example.com/app/learn/[slug]/page.tsx).'),
+    ).toEqual([{ path: 'app/learn/[slug]/page.tsx', line: 173 }])
+  })
+
+  it('never turns a markdown link into a path', () => {
+    expect(extractCitations('Read [the docs](https://example.com/docs) and [notes](docs/notes.md).')).toEqual([])
+    expect(extractCitations('See [the page](app/learn/[slug]/page.tsx) and src/a.ts:1.')).toEqual([
+      { path: 'src/a.ts', line: 1 },
+    ])
+  })
+
+  it('does not pull a bare filename out of a URL that contains a bracket segment', () => {
+    expect(extractCitations('Upstream: https://github.com/o/r/blob/main/app/[slug]/page.tsx:3 is the same.')).toEqual(
+      [],
+    )
+  })
+
+  it('still drops a wrapping bracket or paren around an ordinary citation', () => {
+    expect(extractCitations('Here [src/cli.ts:10] and (a.txt:1) and foo(x) at src/b.ts:2.')).toEqual([
+      { path: 'src/cli.ts', line: 10 },
+      { path: 'a.txt', line: 1 },
+      { path: 'src/b.ts', line: 2 },
+    ])
+  })
+})
+
+describe('verifyCitations — Next.js route segments', () => {
+  it('verifies a citation into a [slug] directory', () => {
+    const scope = tempDir('scoutling-cite-next-')
+    mkdirSync(join(scope, 'app/learn/[slug]'), { recursive: true })
+    writeFileSync(join(scope, 'app/learn/[slug]/page.tsx'), 'a\nb\nc\n')
+    const report = verifyCitations(scope, 'The slug is read at `app/learn/[slug]/page.tsx:2-3`.')
+    expect(report.sources).toEqual([{ path: 'app/learn/[slug]/page.tsx', line: 2, endLine: 3, verified: true }])
+  })
+})
+
+// Regression (same eval): a model that cites `candidates.ts:19` with no directory was marked
+// unverified even when exactly one file of that name is visible in the scope.
+describe('verifyCitations — bare filenames resolved against the scope', () => {
+  function bareScope(): string {
+    const scope = tempDir('scoutling-cite-bare-')
+    mkdirSync(join(scope, 'lib/screener'), { recursive: true })
+    mkdirSync(join(scope, 'scripts'), { recursive: true })
+    mkdirSync(join(scope, 'a'), { recursive: true })
+    mkdirSync(join(scope, 'b'), { recursive: true })
+    mkdirSync(join(scope, 'ignored'), { recursive: true })
+    mkdirSync(join(scope, 'vendor'), { recursive: true })
+    mkdirSync(join(scope, '.git'), { recursive: true })
+    const twenty = Array.from({ length: 100 }, (_, i) => `line ${i + 1}`).join('\n') + '\n'
+    writeFileSync(join(scope, 'lib/screener/candidates.ts'), twenty)
+    writeFileSync(join(scope, 'scripts/run-book-backtests.ts'), twenty)
+    writeFileSync(join(scope, 'a/dup.ts'), twenty)
+    writeFileSync(join(scope, 'b/dup.ts'), twenty)
+    writeFileSync(join(scope, 'root.ts'), 'one\n')
+    writeFileSync(join(scope, 'sub-root.ts'), twenty)
+    mkdirSync(join(scope, 'nested'), { recursive: true })
+    writeFileSync(join(scope, 'nested/root.ts'), twenty)
+    writeFileSync(join(scope, '.gitignore'), 'ignored/\n')
+    writeFileSync(join(scope, 'ignored/secret.ts'), twenty)
+    writeFileSync(join(scope, 'vendor/lib.ts'), twenty)
+    writeFileSync(join(scope, '.git/config.ts'), twenty)
+    return scope
+  }
+
+  it('resolves a unique basename to its scope-relative path and verifies it', () => {
+    const report = verifyCitations(bareScope(), 'Ranked in candidates.ts:19 and run-book-backtests.ts:77-83.')
+    expect(report.sources).toEqual([
+      { path: 'lib/screener/candidates.ts', line: 19, verified: true, citedAs: 'candidates.ts' },
+      {
+        path: 'scripts/run-book-backtests.ts',
+        line: 77,
+        endLine: 83,
+        verified: true,
+        citedAs: 'run-book-backtests.ts',
+      },
+    ])
+    expect(report.verifiedScopeCount).toBe(2)
+  })
+
+  it('still checks the line against the resolved file', () => {
+    const report = verifyCitations(bareScope(), 'See candidates.ts:500.')
+    expect(report.sources).toEqual([
+      { path: 'lib/screener/candidates.ts', line: 500, verified: false, citedAs: 'candidates.ts' },
+    ])
+  })
+
+  it('leaves an ambiguous basename unverified and says why', () => {
+    const report = verifyCitations(bareScope(), 'See dup.ts:3.')
+    expect(report.sources).toEqual([
+      { path: 'dup.ts', line: 3, verified: false, note: 'ambiguous: 2 files in scope are named dup.ts (a/dup.ts, b/dup.ts)' },
+    ])
+  })
+
+  it('leaves a basename with no match unverified and says why', () => {
+    const report = verifyCitations(bareScope(), 'See nowhere.ts:3.')
+    expect(report.sources).toEqual([
+      { path: 'nowhere.ts', line: 3, verified: false, note: 'no file in scope is named nowhere.ts' },
+    ])
+  })
+
+  it('does not loop on a dangling symlink at the scope root that the walk still lists', () => {
+    const scope = bareScope()
+    symlinkSync(join(scope, 'gone.ts'), join(scope, 'dangling.ts'))
+    const report = verifyCitations(scope, 'See dangling.ts:1.')
+    expect(report.sources).toEqual([
+      { path: 'dangling.ts', line: 1, verified: false, citedAs: 'dangling.ts' },
+    ])
+  })
+
+  it('prefers a file at the scope root over a same-named nested one', () => {
+    const report = verifyCitations(bareScope(), 'See root.ts:1.')
+    expect(report.sources).toEqual([{ path: 'root.ts', line: 1, verified: true }])
+  })
+
+  it('never resolves to a gitignored, excludeGlobs-matched, or .git/ file', () => {
+    const scope = bareScope()
+    const report = verifyCitations(scope, 'See secret.ts:1, lib.ts:1 and config.ts:1.', [], {
+      excludeGlobs: ['vendor/**'],
+    })
+    expect(report.sources.map((source) => [source.path, source.verified, source.note])).toEqual([
+      ['secret.ts', false, 'no file in scope is named secret.ts'],
+      ['lib.ts', false, 'no file in scope is named lib.ts'],
+      ['config.ts', false, 'no file in scope is named config.ts'],
+    ])
+    // The same file without the exclusion is resolvable — so the glob is what hid it.
+    expect(verifyCitations(scope, 'See lib.ts:1.').sources[0]).toMatchObject({ path: 'vendor/lib.ts', verified: true })
+  })
+
+  it('collapses a bare citation and the full-path citation of the same line into one source', () => {
+    const report = verifyCitations(bareScope(), 'See lib/screener/candidates.ts:19, i.e. candidates.ts:19.')
+    expect(report.sources).toEqual([{ path: 'lib/screener/candidates.ts', line: 19, verified: true }])
+  })
+
+  it('createCitationVerifier resolves bare names identically and walks the scope once', async () => {
+    const fs = await import('node:fs')
+    const scope = bareScope()
+    const verify = createCitationVerifier(scope)
+    vi.mocked(fs.readdirSync).mockClear()
+    const first = verify('See candidates.ts:19.')
+    const callsAfterFirst = vi.mocked(fs.readdirSync).mock.calls.length
+    const second = verify('And run-book-backtests.ts:77.')
+    expect(first.sources[0]).toMatchObject({ path: 'lib/screener/candidates.ts', verified: true })
+    expect(second.sources[0]).toMatchObject({ path: 'scripts/run-book-backtests.ts', verified: true })
+    expect(callsAfterFirst).toBeGreaterThan(0)
+    expect(vi.mocked(fs.readdirSync).mock.calls.length).toBe(callsAfterFirst)
+  })
+
+  it('does not touch attachment citations or their count', () => {
+    const attachments: Attachment[] = [{ name: 'candidates.ts', path: '/tmp/candidates.ts', content: 'x\n', totalLines: 1 }]
+    const report = verifyCitations(bareScope(), 'See @candidates.ts:1 and candidates.ts:19.', attachments)
+    expect(report.sources).toEqual([
+      { path: '@candidates.ts', line: 1, verified: true, attachment: true },
+      { path: 'lib/screener/candidates.ts', line: 19, verified: true, citedAs: 'candidates.ts' },
+    ])
+    expect(report.verifiedScopeCount).toBe(1)
   })
 })
