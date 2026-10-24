@@ -25,7 +25,7 @@ Shipping today: `config.ts` (six layers + provenance), `provider.ts` (+ `listMod
 tools (`tools/read-file.ts`, `tools/list-dir.ts`, `tools/grep.ts`, assembled by `tools/index.ts`),
 `prompt.ts`, `loop.ts` (`runScoutling`), `budget.ts`, `citations.ts`, `sections.ts`, `attachments.ts`, `toon.ts`, `output.ts`,
 `commands.ts`, `run-setup.ts`, `classify-run-error.ts`, `cli.ts` (`runCli`, injectable I/O),
-`script/smoke.ts`, and `eval/run-eval.ts` (`pnpm eval`). **471 hermetic tests, 23 files.**
+`script/smoke.ts`, and `eval/run-eval.ts` (`pnpm eval`). **493 hermetic tests, 23 files.**
 `pnpm smoke` passes live on `qwen/qwen3-coder-next` **on the shipped defaults** — it no longer
 needs `--budget deep` or `--timeout-ms`.
 

@@ -39,7 +39,10 @@ scoutling doctor       # resolved config, which layer set each key, and what is 
 In text mode the answer goes to stdout, followed by one `Sources: N verified, ...` line.
 `--format json` gives `{answer, sources, sections, model, usage, stepsUsed, toolCalls, exhausted,
 timedOut, wallMs, toolOutputBytes}` instead, where `sources` is
-`[{path, line, endLine?, verified}]` — that array is the fastest way to decide what to read next.
+`[{path, line, endLine?, verified, citedAs?, note?}]` — that array is the fastest way to decide what
+to read next. A bare filename the model cited (`candidates.ts:19`) is resolved to the one visible
+file of that name: `path` is the resolved path and `citedAs` the name as written; when the name is
+ambiguous or matches nothing, it stays unverified and `note` says which.
 
 Two shapes appear on stderr, and they mean different things:
 

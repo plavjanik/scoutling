@@ -189,8 +189,9 @@ function buildAnswerReport(
   scopeRoot: string,
   answer: string,
   attachments: Attachment[] | undefined,
+  excludeGlobs: string[] | undefined,
 ): { citations: CitationReport; sections: RunResult['sections'] } {
-  const verify = createCitationVerifier(scopeRoot, attachments)
+  const verify = createCitationVerifier(scopeRoot, attachments, { excludeGlobs })
   const citations = verify(answer)
   const sections = splitSections(answer).map((section) => ({
     ...section,
@@ -258,7 +259,7 @@ export async function runScoutling(options: RunOptions): Promise<RunResult> {
       }
     }
 
-    const { citations, sections } = buildAnswerReport(options.scopeRoot, answer, options.attachments)
+    const { citations, sections } = buildAnswerReport(options.scopeRoot, answer, options.attachments, options.excludeGlobs)
 
     const exhaustedBy: RunResult['exhaustedBy'] = ['timeout']
     if (toolOutputBudget.exhausted) exhaustedBy.push('bytes')
@@ -364,7 +365,7 @@ export async function runScoutling(options: RunOptions): Promise<RunResult> {
   if (result.finishReason === 'tool-calls') exhaustedBy.push('steps')
   if (toolOutputBudget.exhausted) exhaustedBy.push('bytes')
 
-  const { citations, sections } = buildAnswerReport(options.scopeRoot, result.text, options.attachments)
+  const { citations, sections } = buildAnswerReport(options.scopeRoot, result.text, options.attachments, options.excludeGlobs)
 
   return {
     answer: result.text,

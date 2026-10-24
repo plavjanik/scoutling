@@ -643,6 +643,37 @@ describe('runScoutling', () => {
     expect(result.citations.verifiedCount).toBe(1)
   })
 
+  it("resolves a bare filename in the answer under the run's own excludeGlobs", async () => {
+    // fixtures/scope/sub/nested.txt is the only nested.txt in the scope, so a bare citation to it
+    // resolves — unless the run's excludeGlobs hide sub/, which proves loop.ts hands the config's
+    // visibility to the verifier rather than verifying against everything on disk.
+    const model = () =>
+      new MockLanguageModelV4({
+        doGenerate: async () => ({
+          content: [{ type: 'text' as const, text: 'It is in nested.txt:1.' }],
+          finishReason: { unified: 'stop' as const, raw: undefined },
+          usage: usage(),
+          warnings: [],
+        }),
+      })
+
+    const visible = await runScoutling({ question: 'where?', scopeRoot, model: model(), budget: { maxSteps: 2 } })
+    expect(visible.citations.sources).toEqual([
+      { path: 'sub/nested.txt', line: 1, verified: true, citedAs: 'nested.txt' },
+    ])
+
+    const hidden = await runScoutling({
+      question: 'where?',
+      scopeRoot,
+      model: model(),
+      budget: { maxSteps: 2 },
+      excludeGlobs: ['sub/**'],
+    })
+    expect(hidden.citations.sources).toEqual([
+      { path: 'nested.txt', line: 1, verified: false, note: 'no file in scope is named nested.txt' },
+    ])
+  })
+
   it('populates sections on the salvaged-timeout path too, proven by asserting timedOut: true in the same test', async () => {
     // Mirrors "a timeout that fires after steps completed salvages a
     // RunResult instead of throwing" above, but step 2's text carries a
